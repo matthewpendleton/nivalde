@@ -1,3 +1,10 @@
+<p align="center">
+   <img src = "logo_fixed.png" 
+      width = 200
+      height = 200
+      />
+</p>
+
 # AI Psychotherapy System
 
 An advanced AI system for providing real-time psychotherapeutic services using multimodal input processing, emotional embedding spaces, and adaptive therapeutic interventions.
