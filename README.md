@@ -1,59 +1,99 @@
-<p align="center">
-   <img src = "logo_fixed.png" 
-      width = 200
-      height = 200
-      />
-</p>
+<div align="center">
+  <img src="docs/logo.png" alt="Nivalde Logo" width="200"/>
+  
+  # Nivalde  
+  *AI-Driven Psychotherapeutic Platform*
+</div>
 
-# AI Psychotherapy System
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-green.svg)](https://python.org)
+[![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux-blue)](https://nivalde.ai/docs/installation)
 
-An advanced AI system for providing real-time psychotherapeutic services using multimodal input processing, emotional embedding spaces, and adaptive therapeutic interventions.
+## Installation
 
-## Architecture Overview
+### System Requirements
+| Component | macOS (Development) | Ubuntu 24.10 (Production) |
+|-----------|--------------------|----------------------------|
+| OS        | 14.4+             | 24.10 LTS                  |
+| CPU       | Apple M2+         | x86_64/ARM64               |  
+| RAM       | 16GB              | 32GB+                      |
+| GPU       | M2 Neural Engine  | NVIDIA A100 (CUDA 12+)     |
+| Python    | 3.12+             | 3.12+                      |
 
-1. **Multimodal Input Processing**
-   - Direct audio-to-embedding conversion
-   - Video processing
-   - Text processing for journaling
-
-2. **Contextual Processing (GPT1)**
-   - Lightweight GPT model for initial context processing
-   - Paralinguistic feature preservation
-
-3. **Memory and Emotional Systems**
-   - Transformer^2 based memory system
-   - Hysteretic Emotional Embedding Space (EES)
-   - Phase transition detection for therapeutic opportunities
-
-4. **Therapeutic Planning**
-   - Latent Therapy Manifold (LTM)
-   - Unsupervised therapeutic technique emergence
-   - Diffusion-based intervention planning
-
-5. **Optimization and Execution**
-   - RL-based optimization
-   - GPT2 for natural language generation
-   - Avatar-based therapy delivery
-
-## Setup
-
-1. Create a virtual environment:
+### macOS Setup
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Unix/macOS
-```
+# 1. Install Homebrew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-2. Install dependencies:
-```bash
+# 2. System dependencies
+brew install portaudio graphviz
+
+# 3. Python environment
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Project Structure
+### Ubuntu 24.10 Setup  
+```bash
+# 1. System packages
+sudo apt update && sudo apt install -y \
+    portaudio19-dev \
+    graphviz \
+    python3.12-venv
 
-- `src/`
-  - `input/` - Multimodal input processing
-  - `models/` - Neural network models
-  - `memory/` - Memory and emotional embedding systems
-  - `therapy/` - Therapeutic planning and execution
-  - `avatar/` - Avatar interface
-  - `utils/` - Utility functions
+# 2. NVIDIA drivers (CUDA)
+sudo apt install -y nvidia-driver-550
+
+# 3. Python setup
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Usage
+
+**Development (macOS):**
+```bash
+# Run with Metal acceleration
+python -m src.testing.demo_sessions --device mps
+
+# Start local API
+uvicorn src.api.main:app --reload
+```
+
+**Production (Ubuntu):**  
+```bash
+# Enable CUDA acceleration
+python -m src.api.main --prod --cuda
+
+# Docker deployment
+docker run -it --gpus all -p 8080:8080 nivalde:latest
+```
+
+## Directory Structure
+```
+.
+├── configs/             # Platform-specific configs
+│   ├── macos.yaml
+│   └── ubuntu.yaml
+├── src/
+│   ├── input/          # OS-specific processing
+│   │   ├── audio/
+│   │   │   ├── coreaudio.py  # macOS
+│   │   │   └── pulse.py       # Linux
+│   │   └── video/
+│   │       ├── metal/         # macOS
+│   │       └── cuda/          # Linux
+└── docs/
+    └── platform-setup.md      # Detailed OS guides
+```
+
+<div align="center">
+  <img src="docs/architecture-crossplatform.png" width="800" alt="Cross-Platform Architecture">
+</div>
+
+## Documentation
+- [macOS Development Guide](https://nivalde.ai/docs/macos-setup)
+- [Ubuntu Production Setup](https://nivalde.ai/docs/ubuntu-deployment)
+- [Cross-Platform Testing](https://nivalde.ai/docs/testing)
