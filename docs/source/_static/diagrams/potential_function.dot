@@ -1,0 +1,32 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=filled, fillcolor=lightblue];
+    
+    subgraph cluster_0 {
+        label="Emotional Potential Function V(E)";
+        style=filled;
+        color=lightgrey;
+        
+        potential [shape=none, label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+                <TR>
+                    <TD>
+                        <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+                            <TR><TD PORT="f0">Stable States</TD></TR>
+                            <TR><TD PORT="f1">Energy Barriers</TD></TR>
+                            <TR><TD PORT="f2">Transition Paths</TD></TR>
+                        </TABLE>
+                    </TD>
+                </TR>
+            </TABLE>
+        >];
+        
+        minima [label="Local Minima\n(Stable Emotions)"];
+        barriers [label="Energy Barriers\n(State Transitions)"];
+        paths [label="Minimum Energy Paths\n(Natural Transitions)"];
+        
+        potential:f0 -> minima;
+        potential:f1 -> barriers;
+        potential:f2 -> paths;
+    }
+}

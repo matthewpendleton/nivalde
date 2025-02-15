@@ -1,138 +1,136 @@
+"""Integration tests for the Nivalde AI system."""
+
 import unittest
 import torch
-import numpy as np
-import sounddevice as sd
-from src.input.multimodal_processor import MultimodalProcessor
+from src.input.bert_contextualizer import BERTContextualizer
+from src.memory.memory_system import Transformer2Memory
 from src.memory.emotional_embedding import EmotionalProcessor
-from src.therapy.latent_manifold import TherapeuticPlanner
 
 class TestTherapyPipeline(unittest.TestCase):
     def setUp(self):
-        # Initialize components with consistent embedding dimensions
-        self.multimodal_processor = MultimodalProcessor(
-            audio_embedding_dim=256,
-            contextual_dim=768
-        )
-        self.emotional_processor = EmotionalProcessor(embedding_dim=768)
-        self.therapeutic_planner = TherapeuticPlanner(embedding_dim=768)
-        
-    def generate_mock_audio(self, duration_seconds: float = 1.0, sample_rate: int = 44100):
-        """Generate mock audio data (simulated emotional speech)"""
-        # Create a mixture of frequencies to simulate speech
-        t = np.linspace(0, duration_seconds, int(sample_rate * duration_seconds))
-        
-        # Emotional speech typically has frequencies between 100-500 Hz
-        frequencies = [150, 250, 350]
-        amplitudes = [0.5, 0.3, 0.2]
-        
-        # Generate complex waveform
-        audio = np.zeros_like(t)
-        for f, a in zip(frequencies, amplitudes):
-            audio += a * np.sin(2 * np.pi * f * t)
-            
-        # Add some noise to make it more realistic
-        audio += np.random.normal(0, 0.1, len(t))
-        
-        return torch.from_numpy(audio.astype(np.float32))
+        """Initialize system components."""
+        self.contextualizer = BERTContextualizer()
+        self.memory = Transformer2Memory()
+        self.emotional_processor = EmotionalProcessor()
         
     def test_full_pipeline(self):
-        """Test the complete therapy pipeline from input to intervention"""
-        # 1. Generate mock audio input
-        audio_data = self.generate_mock_audio()
+        """Test complete pipeline from input to emotional state."""
+        # Test input
+        text = "I've been feeling anxious about work lately."
+        emotional_keywords = ["anxious", "stress", "worry"]
         
-        # 2. Process multimodal input (audio only for this test)
-        multimodal_output = self.multimodal_processor.process_input(
-            audio_data=audio_data
+        # 1. Contextualize input
+        bert_context = self.contextualizer(
+            text,
+            emotional_keywords=emotional_keywords
+        )
+        self.assertEqual(bert_context.size(-1), 768)
+        
+        # 2. Process through memory
+        # First interaction - maximum surprise
+        self.memory.store_memory(bert_context)
+        self.assertAlmostEqual(self.memory.surprise_scores[0], 1.0)
+        
+        # Get historical context
+        memory_context = self.memory.get_historical_context(bert_context)
+        self.assertEqual(memory_context.size(-1), 768)
+        
+        # 3. Process emotional state
+        emotional_state, processed_context = self.emotional_processor(
+            bert_context,
+            memory_context
         )
         
-        # Verify multimodal processing
-        self.assertIsNotNone(multimodal_output.audio_embedding)
-        self.assertIsNotNone(multimodal_output.contextual_embedding)
-        self.assertEqual(multimodal_output.contextual_embedding.size(-1), 768)
-        
-        # 3. Process through emotional embedding space
-        emotional_state, transitions = self.emotional_processor.process(
-            multimodal_output.contextual_embedding
-        )
-        
-        # Verify emotional processing
+        # Verify dimensions
         self.assertEqual(emotional_state.size(-1), 768)
-        self.assertIsInstance(transitions, list)
+        self.assertEqual(processed_context.size(-1), 768)
         
-        # 4. Generate therapeutic intervention
-        intervention = self.therapeutic_planner.plan_intervention(
-            emotional_state,
-            temperature=0.8  # Slightly lower temperature for more focused interventions
+        # 4. Test memory influence
+        # Process similar input
+        similar_text = "Work has been making me feel very stressed."
+        similar_context = self.contextualizer(
+            similar_text,
+            emotional_keywords=emotional_keywords
         )
         
-        # Verify intervention
-        self.assertEqual(intervention.size(-1), 768)
+        # Store in memory
+        self.memory.store_memory(similar_context)
         
-        # 5. Test memory retention
-        # Process same input again to test memory effects
-        emotional_state_2, transitions_2 = self.emotional_processor.process(
-            multimodal_output.contextual_embedding
+        # Surprise should be lower for similar content
+        self.assertLess(
+            self.memory.surprise_scores[1],
+            self.memory.surprise_scores[0]
         )
         
-        # Memory should influence the emotional state
-        self.assertFalse(
-            torch.allclose(emotional_state, emotional_state_2),
-            "Memory should influence emotional state processing"
+        # Get updated historical context
+        new_memory_context = self.memory.get_historical_context(similar_context)
+        
+        # Process new emotional state
+        new_state, new_context = self.emotional_processor(
+            similar_context,
+            new_memory_context
         )
         
-    def test_phase_transitions(self):
-        """Test detection of therapeutic opportunities/risks"""
-        # Generate two different emotional states
-        audio_1 = self.generate_mock_audio(duration_seconds=1.0)
-        audio_2 = self.generate_mock_audio(duration_seconds=1.0)
+        # States should be similar but not identical due to memory influence
+        similarity = torch.cosine_similarity(emotional_state, new_state, dim=0)
+        self.assertGreater(similarity, 0.5)
+        self.assertLess(similarity, 1.0)
         
-        # Process first state
-        output_1 = self.multimodal_processor.process_input(audio_data=audio_1)
-        emotional_state_1, _ = self.emotional_processor.process(
-            output_1.contextual_embedding
-        )
-        
-        # Process second state
-        output_2 = self.multimodal_processor.process_input(audio_data=audio_2)
-        emotional_state_2, transitions = self.emotional_processor.process(
-            output_2.contextual_embedding
-        )
-        
-        # Verify phase transition detection
-        self.assertIsInstance(transitions, list)
-        
-    def test_intervention_optimization(self):
-        """Test RL-based optimization of interventions"""
-        # Generate initial state
-        audio_data = self.generate_mock_audio()
-        multimodal_output = self.multimodal_processor.process_input(
-            audio_data=audio_data
-        )
-        emotional_state, _ = self.emotional_processor.process(
-            multimodal_output.contextual_embedding
-        )
-        
-        # Generate multiple interventions
-        interventions = [
-            self.therapeutic_planner.plan_intervention(emotional_state)
-            for _ in range(3)
+    def test_memory_hierarchy(self):
+        """Test hierarchical memory storage based on surprise."""
+        # Generate series of related and unrelated inputs
+        inputs = [
+            "I love spending time with my family.",
+            "My family always makes me happy.",  # Related to first
+            "I'm terrified of heights.",  # Unrelated
+            "Being with my loved ones brings joy.",  # Related to first/second
+            "Spiders really scare me."  # Related to third (fear)
         ]
         
-        # Record mock outcomes
-        for intervention in interventions:
-            self.therapeutic_planner.record_outcome(
-                emotional_state,
-                intervention,
-                outcome_score=np.random.random()  # Mock outcome score
-            )
+        # Process through pipeline
+        for text in inputs:
+            context = self.contextualizer(text)
+            self.memory.store_memory(context)
             
-        # Generate optimized intervention
-        optimized_intervention = self.therapeutic_planner.plan_intervention(
-            emotional_state
-        )
+        # Verify surprise-based hierarchy
+        scores = self.memory.surprise_scores
         
-        # Verify optimization
-        self.assertEqual(optimized_intervention.size(-1), 768)
+        # First input should have max surprise
+        self.assertAlmostEqual(scores[0], 1.0)
         
+        # Related inputs should have lower surprise
+        self.assertLess(scores[1], scores[0])  # Family-related
+        self.assertLess(scores[3], scores[0])  # Family-related
+        
+        # Unrelated inputs should have higher surprise
+        self.assertGreater(scores[2], scores[1])  # Fear vs family
+        
+    def test_emotional_continuity(self):
+        """Test emotional state continuity through memory integration."""
+        # Process sequence of related emotional states
+        sequence = [
+            "I feel calm and peaceful.",
+            "Everything is so serene.",
+            "I'm in a state of tranquility."
+        ]
+        
+        states = []
+        for text in sequence:
+            # Process through pipeline
+            context = self.contextualizer(text)
+            self.memory.store_memory(context)
+            memory_context = self.memory.get_historical_context(context)
+            state, _ = self.emotional_processor(context, memory_context)
+            states.append(state)
+            
+        # Verify emotional continuity
+        for i in range(1, len(states)):
+            similarity = torch.cosine_similarity(states[i], states[i-1], dim=0)
+            self.assertGreater(
+                similarity,
+                0.7,  # High similarity for related emotional states
+                f"States {i} and {i-1} should be similar for related emotions"
+            )
+
 if __name__ == '__main__':
     unittest.main()

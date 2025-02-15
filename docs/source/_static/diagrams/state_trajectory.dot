@@ -1,0 +1,32 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=filled, fillcolor=lightblue];
+    
+    subgraph cluster_0 {
+        label="Emotional State Trajectories";
+        style=filled;
+        color=lightgrey;
+        
+        trajectory [shape=none, label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+                <TR>
+                    <TD>
+                        <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+                            <TR><TD PORT="f0">Initial State E₀</TD></TR>
+                            <TR><TD PORT="f1">Transition Path</TD></TR>
+                            <TR><TD PORT="f2">Final State E₁</TD></TR>
+                        </TABLE>
+                    </TD>
+                </TR>
+            </TABLE>
+        >];
+        
+        initial [label="Initial State\n(Current Emotion)"];
+        path [label="Controlled Evolution\n(Therapeutic Path)"];
+        final [label="Target State\n(Desired Emotion)"];
+        
+        trajectory:f0 -> initial;
+        trajectory:f1 -> path;
+        trajectory:f2 -> final;
+    }
+}

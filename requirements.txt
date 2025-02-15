@@ -1,10 +1,33 @@
+# Core Dependencies
 torch>=2.0.0
+torchdiffeq>=0.2.3
 transformers>=4.30.0
 numpy>=1.24.0
 scipy>=1.10.0
 sounddevice>=0.4.6
-opencv-python>=4.7.0
+opencv-python>=4.8.0
 fastapi>=0.100.0
+sentencepiece>=0.1.99
+
+# Neural ODE and Differential Geometry
+geomstats>=2.7.0
+torchsde>=0.2.5
+torchcde>=0.2.5
+
+# Memory and Attention
+einops>=0.6.1
+pytorch-lightning>=2.0.0
+
+# Visualization and Monitoring
+tensorboard>=2.13.0
+wandb>=0.15.0
+
+# API and Services
 uvicorn>=0.22.0
 pydantic>=2.0.0
-sentencepiece>=0.1.99  # Required for BERT tokenization
+python-multipart>=0.0.6
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+hypothesis>=6.82.6

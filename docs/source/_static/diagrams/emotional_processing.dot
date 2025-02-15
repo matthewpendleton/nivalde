@@ -1,0 +1,44 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=rounded, fontname="Arial", fontsize=10];
+    edge [fontname="Arial", fontsize=8];
+    
+    subgraph cluster_input {
+        label="Input Context";
+        style=dashed;
+        color=blue;
+        
+        bert [label="BERT\nContext"];
+        memory [label="Memory\nContext"];
+    }
+    
+    subgraph cluster_processing {
+        label="Context Processing";
+        style=dashed;
+        color=green;
+        
+        combine [label="Context\nCombination"];
+        process [label="Context\nProcessor"];
+        
+        combine -> process;
+    }
+    
+    subgraph cluster_state {
+        label="State Integration";
+        style=dashed;
+        color=red;
+        
+        prev [label="Previous\nState"];
+        integrate [label="State\nIntegrator"];
+        new [label="New\nState"];
+        
+        prev -> integrate;
+        integrate -> new;
+    }
+    
+    bert -> combine;
+    memory -> combine;
+    process -> integrate;
+    
+    new -> prev [label="update", constraint=false];
+}

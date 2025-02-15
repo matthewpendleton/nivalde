@@ -1,0 +1,32 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=filled, fillcolor=lightblue];
+    
+    subgraph cluster_0 {
+        label="Therapeutic Manifold Constraints";
+        style=filled;
+        color=lightgrey;
+        
+        constraints [shape=none, label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+                <TR>
+                    <TD>
+                        <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+                            <TR><TD PORT="f0">Emotional Continuity</TD></TR>
+                            <TR><TD PORT="f1">Memory Consistency</TD></TR>
+                            <TR><TD PORT="f2">Therapeutic Goals</TD></TR>
+                        </TABLE>
+                    </TD>
+                </TR>
+            </TABLE>
+        >];
+        
+        continuity [label="Emotional Continuity\nG₁(E, M) = 0"];
+        consistency [label="Memory Consistency\nG₂(E, M) = 0"];
+        goals [label="Therapeutic Goals\nG₃(E, M) = 0"];
+        
+        constraints:f0 -> continuity;
+        constraints:f1 -> consistency;
+        constraints:f2 -> goals;
+    }
+}

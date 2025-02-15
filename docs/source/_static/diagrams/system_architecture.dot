@@ -1,0 +1,45 @@
+digraph G {
+    rankdir=LR;
+    node [shape=box, style=filled, fontname="Arial", fontsize=10];
+    edge [fontname="Arial", fontsize=8];
+    
+    subgraph cluster_0 {
+        label="Input Processing";
+        style=filled;
+        color=lightblue;
+        
+        input [label="Client Input"];
+        bert [label="BERT Contextualizer\n(w/ Emotional Weights)"];
+        context [label="Contextualized\nRepresentation"];
+        
+        input -> bert -> context;
+    }
+    
+    subgraph cluster_1 {
+        label="Memory System";
+        style=filled;
+        color=lightgreen;
+        
+        memory [label="Transformer² Memory\n(Surprise-Weighted\nAttention)"];
+        hierarchy [label="Hierarchical\nOrganization"];
+        
+        memory -> hierarchy;
+    }
+    
+    subgraph cluster_2 {
+        label="Emotional Processing";
+        style=filled;
+        color=lightpink;
+        
+        integration [label="Context Integration\n(W_c[c_t; M_t] + b_c)"];
+        evolution [label="State Evolution\n(σ(W_e c_t + b_e))"];
+        hysteresis [label="Hysteretic Integration\n(αE_{t-1} + (1-α)E_t)"];
+        
+        integration -> evolution -> hysteresis;
+    }
+    
+    context -> memory;
+    context -> integration;
+    memory -> integration;
+    hysteresis -> memory;
+}

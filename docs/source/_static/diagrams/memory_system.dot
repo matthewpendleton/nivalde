@@ -1,0 +1,52 @@
+digraph G {
+    rankdir=TB;
+    node [shape=box, style=rounded, fontname="Arial", fontsize=10];
+    edge [fontname="Arial", fontsize=8];
+    
+    subgraph cluster_input {
+        label="Memory Input";
+        style=dashed;
+        color=blue;
+        
+        new_memory [label="New Memory"];
+        surprise [label="Surprise\nComputation"];
+        
+        new_memory -> surprise;
+    }
+    
+    subgraph cluster_storage {
+        label="Hierarchical Storage";
+        style=dashed;
+        color=green;
+        
+        store [label="Memory Store"];
+        {
+            rank=same;
+            high [label="High\nSurprise"];
+            med [label="Medium\nSurprise"];
+            low [label="Low\nSurprise"];
+        }
+        
+        store -> high;
+        store -> med;
+        store -> low;
+    }
+    
+    subgraph cluster_retrieval {
+        label="Context Retrieval";
+        style=dashed;
+        color=red;
+        
+        query [label="Current\nInput"];
+        attention [label="Transformer\nAttention"];
+        context [label="Historical\nContext"];
+        
+        query -> attention;
+        attention -> context;
+    }
+    
+    surprise -> store [label="surprise\nscore"];
+    high -> attention;
+    med -> attention;
+    low -> attention;
+}
