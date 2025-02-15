@@ -7,8 +7,8 @@ output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'source/_s
 os.makedirs(output_dir, exist_ok=True)
 
 dot = Digraph(comment='Nivalde Architecture', format='png')
-dot.attr(rankdir='TB', splines='polyline')
-dot.attr('node', shape='ellipse', style='filled', fillcolor='white')
+dot.attr(rankdir='LR', splines='ortho')  # Changed to left-to-right layout
+dot.attr('node', shape='ellipse', style='filled', fillcolor='lightblue')  # Changed node color
 
 # Input processing
 with dot.subgraph(name='cluster_input') as inp:
