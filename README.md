@@ -97,3 +97,24 @@ docker run -it --gpus all -p 8080:8080 nivalde:latest
 - [macOS Development Guide](https://nivalde.ai/docs/macos-setup)
 - [Ubuntu Production Setup](https://nivalde.ai/docs/ubuntu-deployment)
 - [Cross-Platform Testing](https://nivalde.ai/docs/testing)
+
+## Documentation
+
+The documentation is built using [Sphinx](https://www.sphinx-doc.org/). To build the docs:
+
+```bash
+# Install documentation dependencies
+pip install -r docs/requirements.txt
+
+# Build the documentation
+cd docs
+make html
+
+# View the documentation (macOS)
+open build/html/index.html
+
+# View the documentation (Linux)
+xdg-open build/html/index.html
+```
+
+The built documentation will be available in `docs/build/html/`. For development, you can use `make livehtml` to automatically rebuild the documentation when changes are detected.
