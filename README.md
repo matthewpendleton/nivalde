@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/logo.png" alt="Nivalde Logo" width="200"/>
+  <img src="docs/logo_fixed.png" alt="Nivalde Logo" width="200"/>
   
   # Nivalde  
   *AI-Driven Psychotherapeutic Platform*
