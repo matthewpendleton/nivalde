@@ -137,7 +137,7 @@ docker run -it --gpus all -p 8080:8080 nivalde:latest
 ```
 
 <div align="center">
-  <img src="docs/architecture-crossplatform.png" width="800" alt="Cross-Platform Architecture">
+  <img src="docs/source/_static/diagrams/system_architecture.png" width="800" alt="System Architecture">
 </div>
 
 ## Documentation
