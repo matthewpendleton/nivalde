@@ -9,6 +9,53 @@
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-green.svg)](https://python.org)
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%20|%20Linux-blue)](https://nivalde.ai/docs/installation)
 
+## Overview
+
+Nivalde is an advanced AI-driven psychotherapy platform that combines state-of-the-art natural language processing with sophisticated emotional understanding. The system is built on two key mathematical frameworks:
+
+1. **Emotional Embedding Space (EES)**: A high-dimensional state space that captures patient emotional states and their dynamics, including:
+   - Natural emotional transitions
+   - Phase transition opportunities
+   - Path-dependent evolution
+
+2. **Therapeutic State Manifold (TSM)**: A distinct space of therapeutic approaches that guides intervention strategies for optimal patient development.
+
+### Key Features
+
+- **Advanced Emotional Processing**
+  - BERT-based contextual understanding
+  - Hysteretic state evolution
+  - Local topology analysis
+
+- **Sophisticated Therapeutic Planning**
+  - Opportunistic intervention strategies
+  - Long-term flourishing optimization
+  - Natural transition pathways
+
+- **Robust Architecture**
+  - Modular component design
+  - Comprehensive testing suite
+  - Scalable deployment options
+
+### System Components
+
+- **Input Processing**
+  - BERT Contextualizer
+  - Multimodal Integration
+  - Emotional Keyword Enhancement
+
+- **Memory System**
+  - Hierarchical Transformer² Architecture
+  - Surprise-based Memory Organization
+  - Context-aware Retrieval
+
+- **Therapeutic Engine**
+  - State Space Mapping
+  - Response Generation
+  - Intervention Optimization
+
+For detailed documentation, mathematical foundations, and usage examples, see our [comprehensive documentation](https://nivalde.ai/docs/).
+
 ## Installation
 
 ### System Requirements
