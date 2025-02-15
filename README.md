@@ -26,7 +26,7 @@
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # 2. System dependencies
-brew install portaudio graphviz
+brew install portaudio graphviz cmake
 
 # 3. Python environment
 python -m venv .venv
