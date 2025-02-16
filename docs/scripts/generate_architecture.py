@@ -7,63 +7,72 @@ output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'source/_s
 os.makedirs(output_dir, exist_ok=True)
 
 dot = Digraph(comment='Nivalde Architecture', format='png')
-dot.attr(rankdir='LR', splines='ortho')  # Changed to left-to-right layout
-dot.attr('node', shape='ellipse', style='filled', fillcolor='lightblue')  # Changed node color
+dot.attr(rankdir='TB')  # Top to bottom layout
+dot.attr('node', shape='box', style='rounded,filled', fillcolor='white', margin='0.3,0.2')
+dot.attr(splines='ortho')  # Orthogonal edges for cleaner look
 
-# Input processing
+# Define node styles
+MAIN_NODE = {'shape': 'box', 'style': 'rounded,filled', 'fillcolor': 'lightgray'}
+MEMORY_NODE = {'shape': 'box', 'style': 'rounded,filled', 'fillcolor': '#E8F5E9'}  # Light green
+MATH_NODE = {'shape': 'box', 'style': 'rounded,filled', 'fillcolor': '#E3F2FD'}    # Light blue
+PROCESS_NODE = {'shape': 'box', 'style': 'rounded,filled', 'fillcolor': '#FFF3E0'} # Light orange
+
+# Input and BERT processing
 with dot.subgraph(name='cluster_input') as inp:
     inp.attr(label='Input Processing', style='dashed')
-    inp.node('A', 'Multimodal Input\n(Audio/Video/Text)')
-    inp.node('B', 'BERT Contextualizer\n(Emotional Enhancement)')
-    inp.edge('A', 'B')
+    inp.node('input', 'Multimodal Input\n(Audio/Video/Text)', **MAIN_NODE)
+    inp.node('bert', 'BERT Contextualizer\n(Emotional Enhancement)', **MAIN_NODE)
+    inp.edge('input', 'bert')
 
-# Memory and Transformer² system
+# Memory system
 with dot.subgraph(name='cluster_memory') as mem:
     mem.attr(label='Memory System', style='dashed')
-    # Transformer² as central memory processor
-    mem.node('T2', 'Transformer²\nProcessor', shape='doubleoctagon')
+    mem.node('t2', 'Transformer²\nProcessor', **MEMORY_NODE)
+    mem.node('em', 'Episodic\nMemory', **MEMORY_NODE)
+    mem.node('sm', 'Semantic\nMemory', **MEMORY_NODE)
+    mem.node('pm', 'Procedural\nMemory', **MEMORY_NODE)
     
-    # Memory components
-    mem.node('EM', 'Episodic Memory')
-    mem.node('SM', 'Semantic Memory')
-    mem.node('PM', 'Procedural Memory')
+    # Memory connections
+    mem.edge('t2', 'em', dir='both')
+    mem.edge('t2', 'sm', dir='both')
+    mem.edge('t2', 'pm', dir='both')
+    mem.edge('em', 'sm', style='dotted')
+    mem.edge('sm', 'pm', style='dotted')
+
+# Mathematical foundations
+with dot.subgraph(name='cluster_math') as math:
+    math.attr(label='Mathematical Foundations', style='dashed')
+    math.node('ees', 'Emotional Embedding Space\n(EES)', **MATH_NODE)
+    math.node('map', 'State Mapping Function\nf: ℋ(EES) → TSM', **MATH_NODE)
+    math.node('tsm', 'Therapeutic State Manifold\n(TSM)', **MATH_NODE)
     
-    # Memory hierarchy with Transformer² at center
-    mem.edge('T2', 'EM', dir='both', xlabel='Write/Read')
-    mem.edge('T2', 'SM', dir='both', xlabel='Write/Read')
-    mem.edge('T2', 'PM', dir='both', xlabel='Write/Read')
+    # Connect mathematical components
+    math.edge('ees', 'map')
+    math.edge('map', 'tsm')
+
+# Response generation
+with dot.subgraph(name='cluster_response') as resp:
+    resp.attr(label='Response Generation', style='dashed')
+    resp.node('rl', 'RL Optimization\n(PPO)', **PROCESS_NODE)
+    resp.node('gpt', 'Response Generation\n(Contextual GPT)', **PROCESS_NODE)
+    resp.node('test', 'Adversarial Testing\n(GPT-4)', **PROCESS_NODE)
     
-    # Memory relationships
-    mem.edge('EM', 'SM', style='dotted')
-    mem.edge('SM', 'PM', style='dotted')
+    # Response pipeline
+    resp.edge('rl', 'gpt')
+    resp.edge('gpt', 'test')
 
-# State spaces and mapping
-with dot.subgraph(name='cluster_therapeutic') as emb:
-    emb.attr(label='Therapeutic Processing', style='dashed')
-    emb.node('EES', 'Emotional Embedding Space\n(EES)', shape='doubleoctagon')
-    emb.node('MAP', 'State Mapping Function\nf: ℋ(EES) → TSM')
-    emb.node('TSM', 'Therapeutic State Manifold\n(TSM)', shape='doubleoctagon')
-    emb.edge('EES', 'MAP')
-    emb.edge('MAP', 'TSM')
-
-# Output processing
-dot.node('RL', 'RL Optimization\n(PPO)')
-dot.node('GPT', 'Contextual GPT\n(Response Generation)')
-dot.node('AT', 'Adversarial Testing\n(GPT-4)')
-
-# Connect components
-dot.edge('B', 'T2', xlabel='New Information')
-dot.edge('T2', 'EES', xlabel='Memory Context')
-dot.edge('TSM', 'RL', xlabel='Intervention Selection')
-dot.edge('RL', 'GPT')
-dot.edge('GPT', 'AT')
+# Main connections between components
+dot.edge('bert', 'ees', xlabel='Emotional\nContext')  # BERT directly to EES
+dot.edge('bert', 't2', xlabel='Contextual\nInformation')  # BERT also feeds T²
+dot.edge('t2', 'ees', xlabel='Memory\nContext')  # T² also connects to EES
+dot.edge('tsm', 'rl', xlabel='Therapeutic\nStrategy')
 
 # Feedback loops
-dot.edge('AT', 'A', xlabel='Client Feedback', style='dashed', constraint='false')
-dot.edge('AT', 'T2', xlabel='Memory Update', style='dashed', constraint='false')
-dot.edge('RL', 'TSM', xlabel='Policy Update', style='dotted', constraint='false')
+dot.edge('test', 'input', xlabel='Client\nFeedback', style='dashed', constraint='false')
+dot.edge('test', 't2', xlabel='Memory\nUpdate', style='dashed', constraint='false')
+dot.edge('rl', 'tsm', xlabel='Policy\nUpdate', style='dotted', constraint='false')
 
-# Graph attributes
+# Graph attributes for better layout
 dot.attr(ranksep='1.0')
 dot.attr(nodesep='0.75')
 dot.attr(concentrate='true')
