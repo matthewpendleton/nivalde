@@ -139,3 +139,36 @@ class Transformer2Memory(nn.Module):
         
         # Return processed context
         return context[0]  # First token contains contextualized representation
+
+
+class TransformerMemorySystem(nn.Module):
+    """High-level interface for the Transformer² memory system."""
+    
+    def __init__(self, embedding_dim: int = 768):
+        """Initialize the memory system.
+        
+        Args:
+            embedding_dim: Dimension of input embeddings
+        """
+        super().__init__()
+        self.memory = Transformer2Memory(dim=embedding_dim)
+        
+    def forward(self,
+                current_input: torch.Tensor,
+                previous_memory: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Process input through memory system.
+        
+        Args:
+            current_input: Current input embedding
+            previous_memory: Optional previous memory state
+            
+        Returns:
+            Updated memory context
+        """
+        # Store current input in memory
+        self.memory.store_memory(current_input)
+        
+        # Get historical context
+        context = self.memory.get_historical_context(current_input)
+        
+        return context
