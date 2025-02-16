@@ -7,14 +7,33 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import umap
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
 
 from src.emotional_embedding.ees import EmotionalEmbeddingSpace
 from src.memory.memory_system import TransformerMemorySystem
+from src.emotional_embedding.train import train_ees
 from tests.test_data.personality_disorder_scenarios import (
     TEST_VIGNETTE,
     PERSONALITY_SCENARIOS,
     PERSONALITY_MARKERS
 )
+
+def prepare_training_data():
+    """Prepare training sequences from scenarios."""
+    training_sequences = []
+    
+    # Convert each scenario's dialogue into a training sequence
+    for scenario_id, scenario in PERSONALITY_SCENARIOS.items():
+        training_sequences.append(scenario["dialogue"])
+        
+    # Split into train/val
+    train_sequences, val_sequences = train_test_split(
+        training_sequences,
+        test_size=0.2,
+        random_state=42
+    )
+    
+    return train_sequences, val_sequences
 
 def process_personality_scenario(
     ees_model: EmotionalEmbeddingSpace,
@@ -22,47 +41,47 @@ def process_personality_scenario(
     dialogue: list,
     test_vignette: list
 ) -> tuple:
-    """Process a personality scenario through EES.
-    
-    Args:
-        ees_model: Emotional embedding model
-        memory_system: Memory system
-        dialogue: List of dialogue entries
-        test_vignette: List of test situation entries
-        
-    Returns:
-        Tuple of (personality embeddings, vignette embeddings)
-    """
+    """Process a personality scenario through trained EES."""
     personality_embeddings = []
     memory_context = torch.zeros(1, 768)
+    ees_model.previous_state = None
     
     # Process personality dialogue
     for utterance in dialogue:
-        current_embedding = torch.randn(1, 768)
+        # In real implementation, this would use BERT
+        current_state = torch.randn(1, 768)
+        bert_context = torch.randn(1, 768)
+        
         state = ees_model(
-            current_state=current_embedding,
-            bert_context=current_embedding,
+            current_state=current_state,
+            bert_context=bert_context,
             memory_context=memory_context
         )
+        
         memory_context = memory_system(
-            current_input=current_embedding,
+            current_input=current_state,
             previous_memory=memory_context
         )
+        
         personality_embeddings.append(state.detach())
     
     # Process test vignette
     vignette_embeddings = []
     for utterance in test_vignette:
-        current_embedding = torch.randn(1, 768)
+        current_state = torch.randn(1, 768)
+        bert_context = torch.randn(1, 768)
+        
         state = ees_model(
-            current_state=current_embedding,
-            bert_context=current_embedding,
+            current_state=current_state,
+            bert_context=bert_context,
             memory_context=memory_context
         )
+        
         memory_context = memory_system(
-            current_input=current_embedding,
+            current_input=current_state,
             previous_memory=memory_context
         )
+        
         vignette_embeddings.append(state.detach())
     
     return (
@@ -70,25 +89,42 @@ def process_personality_scenario(
         torch.stack(vignette_embeddings).squeeze(1)
     )
 
-def analyze_personality_patterns():
+def analyze_personality_patterns(trained_models=None):
     """Analyze personality disorder patterns and their influence on interpretation."""
-    # Initialize models
-    ees = EmotionalEmbeddingSpace(dim=768)
-    memory_system = TransformerMemorySystem(embedding_dim=768)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    if trained_models is None:
+        # Prepare training data
+        train_sequences, val_sequences = prepare_training_data()
+        
+        # Train models
+        print("\nTraining EES model...")
+        ees, memory_system = train_ees(
+            train_sequences,
+            val_sequences,
+            num_epochs=50  # Reduced for testing
+        )
+    else:
+        ees, memory_system = trained_models
+    
+    ees.eval()
+    memory_system.eval()
     
     # Process scenarios
+    print("\nProcessing scenarios through trained model...")
     personality_embeddings = {}
     vignette_embeddings = {}
     
-    for scenario_id, scenario in PERSONALITY_SCENARIOS.items():
-        personality_emb, vignette_emb = process_personality_scenario(
-            ees,
-            memory_system,
-            scenario["dialogue"],
-            TEST_VIGNETTE
-        )
-        personality_embeddings[scenario_id] = personality_emb
-        vignette_embeddings[scenario_id] = vignette_emb
+    with torch.no_grad():
+        for scenario_id, scenario in PERSONALITY_SCENARIOS.items():
+            personality_emb, vignette_emb = process_personality_scenario(
+                ees,
+                memory_system,
+                scenario["dialogue"],
+                TEST_VIGNETTE
+            )
+            personality_embeddings[scenario_id] = personality_emb
+            vignette_embeddings[scenario_id] = vignette_emb
     
     # Combine all embeddings for visualization
     all_embeddings = []
@@ -101,6 +137,7 @@ def analyze_personality_patterns():
     all_embeddings = torch.cat(all_embeddings).numpy()
     
     # UMAP dimensionality reduction
+    print("\nPerforming UMAP dimensionality reduction...")
     reducer = umap.UMAP(
         n_neighbors=15,
         min_dist=0.1,
@@ -149,7 +186,7 @@ def analyze_personality_patterns():
         start_idx = end_idx
     
     plt.title(
-        "Personality Patterns in Emotional Space\n" +
+        "Personality Patterns in Learned Emotional Space\n" +
         "(Trajectories show emotional evolution through dialogue)",
         fontsize=14,
         pad=20

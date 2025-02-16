@@ -44,3 +44,6 @@ Thumbs.db
 *.log
 *.model
 checkpoints/
+
+# Generated data
+data/generated_sessions/
