@@ -1,5 +1,12 @@
 """Training script for the Emotional Embedding Space."""
 
+import os
+import sys
+
+# Add project root to Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, project_root)
+
 import numpy as np
 import h5py
 import json
@@ -13,6 +20,12 @@ from transformers import AutoTokenizer, AutoModel
 from typing import List, Dict, Tuple, Iterator
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+import gc
+import multiprocessing as mp
+import traceback
+import psutil
+import time
+from datetime import datetime
 
 from src.emotional_embedding.ees import EmotionalEmbeddingSpace
 from src.memory.memory_system import TransformerMemorySystem
@@ -44,10 +57,27 @@ class TherapySessionDataset(Dataset):
         self.batch_size = batch_size
         self.cache_size = cache_size
         self.checkpoint_dir = checkpoint_dir
-        self._pool = None  # Will be initialized when needed
+        self._pool = None
         
-        # Get list of all client files
-        self.files = sorted(glob.glob(f"{data_dir}/client_*.json"))
+        # Validate data directory
+        if not os.path.exists(data_dir):
+            raise ValueError(f"Data directory does not exist: {data_dir}")
+        
+        # Get list of all client files using os.listdir instead of glob
+        data_path = Path(data_dir)
+        try:
+            all_files = os.listdir(data_path)
+            self.files = sorted([
+                str(data_path / f) for f in all_files
+                if f.startswith('client_') and f.endswith('.json')
+            ])
+            logger.info(f"Found {len(all_files)} total files, {len(self.files)} matching client_*.json pattern")
+        except Exception as e:
+            raise ValueError(f"Error reading data directory {data_dir}: {str(e)}")
+        
+        if not self.files:
+            raise ValueError(f"No client files found in {data_dir}. Files found: {all_files}")
+            
         if max_sessions:
             random.shuffle(self.files)
             num_files = int(max_sessions / 10)  # Each file has 10 sessions
@@ -61,23 +91,42 @@ class TherapySessionDataset(Dataset):
         self.cache = []
         self.cache_indices = set()
         
+        # Create checkpoint directory
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Ensure BERT model is in eval mode
+        self.model.eval()
+        
         # Try to load from checkpoint
         self._load_or_create_cache()
     
     def cleanup(self):
         """Clean up resources used by the dataset."""
         if self._pool is not None:
-            self._pool.close()
-            self._pool.join()
-            self._pool = None
+            try:
+                self._pool.close()
+                self._pool.join()
+            except Exception as e:
+                logger.warning(f"Error closing multiprocessing pool: {str(e)}")
+            finally:
+                self._pool = None
         
         # Clear CUDA cache if available
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.empty_cache()
+            except Exception as e:
+                logger.warning(f"Error clearing CUDA cache: {str(e)}")
         
-        # Clear the cache to free memory
-        self.cache.clear()
-        self.cache_indices.clear()
+        # Clear memory
+        gc.collect()
+    
+    def __del__(self):
+        """Ensure cleanup when object is destroyed."""
+        try:
+            self.cleanup()
+        except Exception as e:
+            logger.warning(f"Error during cleanup in __del__: {str(e)}")
     
     def _load_or_create_cache(self):
         """Load cache from checkpoint if exists, otherwise create new cache."""
@@ -91,35 +140,40 @@ class TherapySessionDataset(Dataset):
                     num_sessions = f['num_sessions'][()]
                     logger.info(f"Checkpoint contains {num_sessions} sessions")
                     
-                    # Load sessions into cache
-                    sessions_to_load = min(num_sessions, self.cache_size)
-                    logger.info(f"Loading {sessions_to_load} sessions into cache")
-                    
-                    for i in range(sessions_to_load):
-                        session_group = f[f'session_{i}']
-                        sequence = []
-                        num_utterances = session_group['num_utterances'][()]
+                    if num_sessions > 0:
+                        # Load sessions into cache
+                        sessions_to_load = min(num_sessions, self.cache_size)
+                        logger.info(f"Loading {sessions_to_load} sessions into cache")
                         
-                        for j in range(num_utterances):
-                            embedding = torch.from_numpy(session_group[f'utterance_{j}'][()]).float()
-                            sequence.append(embedding)
+                        for i in range(sessions_to_load):
+                            session_group = f[f'session_{i}']
+                            sequence = []
+                            num_utterances = session_group['num_utterances'][()]
+                            
+                            for j in range(num_utterances):
+                                embedding = torch.from_numpy(session_group[f'utterance_{j}'][()]).float()
+                                sequence.append(embedding)
+                            
+                            self.cache.append(sequence)
+                            if (i + 1) % 100 == 0:
+                                logger.info(f"Loaded {i + 1} sessions")
                         
-                        self.cache.append(sequence)
-                        if (i + 1) % 100 == 0:
-                            logger.info(f"Loaded {i + 1} sessions")
-                    
-                    # Load remaining files
-                    self.files = json.loads(f['remaining_files'][()])
-                    logger.info(f"Loaded {len(self.files)} remaining files to process")
-                
-                logger.info(f"Successfully loaded {len(self.cache)} cached sessions")
-                return
+                        # Load remaining files
+                        remaining_files = json.loads(f['remaining_files'][()])
+                        if remaining_files:
+                            self.files = remaining_files
+                            logger.info(f"Loaded {len(self.files)} remaining files to process")
+                        
+                        logger.info(f"Successfully loaded {len(self.cache)} cached sessions")
+                        return
+                    else:
+                        logger.info("Checkpoint is empty, creating new cache")
                 
             except Exception as e:
                 logger.error(f"Error loading checkpoint: {str(e)}")
                 logger.error("Falling back to creating new cache")
         
-        logger.info(f"No valid checkpoint found at {checkpoint_path}, creating new cache")
+        logger.info(f"Creating new cache for {dataset_type} dataset")
         self._fill_cache()
     
     def _save_checkpoint(self):
@@ -158,14 +212,20 @@ class TherapySessionDataset(Dataset):
         logger.info(f"Processing sessions for {'validation' if self.validation else 'training'} dataset")
         logger.info(f"Target cache size: {self.cache_size}, Files to process: {len(self.files)}")
         
+        start_time = time.time()
         pbar = tqdm(total=self.cache_size, desc="Processing sessions")
         checkpoint_frequency = 100  # Save checkpoint every 100 sessions
         
         try:
-            # Process files in batches for efficiency
+            # Process files in smaller batches for better memory management
             batch_utterances = []
             batch_indices = []
-            max_batch_size = 32  # Process 32 utterances at once
+            max_batch_size = 16  # Reduced from 32 to 16 for better memory usage
+            
+            # Track memory usage
+            process = psutil.Process()
+            initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+            logger.info(f"Initial memory usage: {initial_memory:.2f} MB")
             
             while len(self.cache) < self.cache_size and self.files:
                 file_path = self.files.pop(0)
@@ -178,48 +238,69 @@ class TherapySessionDataset(Dataset):
                             if len(self.cache) >= self.cache_size:
                                 break
                             
-                            # Collect utterances for batch processing
-                            sequence = []
-                            for utterance in session['dialog']:
-                                batch_utterances.append(utterance)
-                                batch_indices.append(len(sequence))
-                                sequence.append(None)  # Placeholder
+                            try:
+                                # Process utterances in smaller chunks
+                                sequence = []
+                                session_utterances = session['dialog']
                                 
-                                # Process batch when it reaches max size
-                                if len(batch_utterances) >= max_batch_size:
-                                    embeddings = self._process_utterance_batch(batch_utterances)
-                                    self._update_sequences(embeddings, batch_indices, sequence)
-                                    batch_utterances = []
-                                    batch_indices = []
-                            
-                            # Process remaining utterances in the session
-                            if batch_utterances:
-                                embeddings = self._process_utterance_batch(batch_utterances)
-                                self._update_sequences(embeddings, batch_indices, sequence)
-                                batch_utterances = []
-                                batch_indices = []
-                            
-                            self.cache.append(sequence)
-                            pbar.update(1)
-                            
-                            # Save checkpoint periodically
-                            if len(self.cache) % checkpoint_frequency == 0:
-                                self._save_checkpoint()
+                                # Process utterances in chunks of max_batch_size
+                                for i in range(0, len(session_utterances), max_batch_size):
+                                    chunk = session_utterances[i:i + max_batch_size]
+                                    chunk_indices = list(range(len(sequence), len(sequence) + len(chunk)))
+                                    sequence.extend([None] * len(chunk))
+                                    
+                                    try:
+                                        # Process chunk
+                                        embeddings = self._process_utterance_batch(chunk)
+                                        self._update_sequences(embeddings, chunk_indices, sequence)
+                                    except Exception as chunk_error:
+                                        logger.error(f"Error processing chunk: {str(chunk_error)}")
+                                        continue
+                                    finally:
+                                        # Clear memory after each chunk
+                                        if 'embeddings' in locals():
+                                            del embeddings
+                                        torch.cuda.empty_cache() if torch.cuda.is_available() else None
                                 
-                except Exception as e:
-                    logger.error(f"Error processing file {file_path}: {str(e)}")
+                                # Add completed sequence to cache
+                                if all(x is not None for x in sequence):
+                                    self.cache.append([emb.cpu() for emb in sequence])
+                                    pbar.update(1)
+                                
+                                    # Save checkpoint periodically
+                                    if len(self.cache) % checkpoint_frequency == 0:
+                                        current_memory = process.memory_info().rss / 1024 / 1024
+                                        logger.info(f"Current memory usage: {current_memory:.2f} MB")
+                                        self._save_checkpoint()
+                                        logger.info(f"Saved checkpoint with {len(self.cache)} sessions")
+                                else:
+                                    logger.warning(f"Skipping incomplete sequence in {file_path}")
+                                
+                            except Exception as session_error:
+                                logger.error(f"Error processing session: {str(session_error)}")
+                                continue
+                            
+                except Exception as file_error:
+                    logger.error(f"Error processing file {file_path}: {str(file_error)}")
                     continue
-                
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user, saving checkpoint...")
-            self._save_checkpoint()
+                finally:
+                    # Clear memory after each file
+                    gc.collect()
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+        except Exception as e:
+            logger.error(f"Error filling cache: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
         
         finally:
+            end_time = time.time()
+            final_memory = process.memory_info().rss / 1024 / 1024
+            logger.info(f"Final memory usage: {final_memory:.2f} MB")
+            logger.info(f"Memory change: {final_memory - initial_memory:.2f} MB")
+            logger.info(f"Total processing time: {(end_time - start_time) / 60:.2f} minutes")
             pbar.close()
-            # Save final checkpoint
             self._save_checkpoint()
-            logger.info(f"Cached {len(self.cache)} sessions")
     
     def _process_utterance_batch(self, utterances):
         """Process a batch of utterances through BERT."""
@@ -296,6 +377,10 @@ def train_ees(
 ):
     """Train the Emotional Embedding Space model using batched data."""
     
+    # Create checkpoint directory if it doesn't exist
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
     # Initialize models
     ees = EmotionalEmbeddingSpace(
         input_dim=input_dim,
@@ -307,7 +392,7 @@ def train_ees(
         embedding_dim=input_dim
     ).to(device)
     
-    # Initialize optimizer
+    # Initialize optimizer with gradient clipping
     optimizer = torch.optim.Adam(
         list(ees.parameters()) + list(memory_system.parameters()),
         lr=learning_rate
@@ -318,7 +403,8 @@ def train_ees(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_sessions
+        collate_fn=collate_sessions,
+        num_workers=0  # Disable multiprocessing for now
     )
     
     if val_dataset:
@@ -326,133 +412,113 @@ def train_ees(
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            collate_fn=collate_sessions
+            collate_fn=collate_sessions,
+            num_workers=0
         )
     
-    logger.info(f"Starting training with {num_epochs} epochs")
-    
-    # Training loop
+    # Initialize training metrics
     best_val_loss = float('inf')
-    for epoch in range(num_epochs):
-        logger.info(f"\nEpoch {epoch+1}/{num_epochs}")
-        ees.train()
-        memory_system.train()
-        
-        total_loss = 0
-        total_emotional_coherence = 0  # Measure how well emotions flow
-        total_contextual_alignment = 0  # Measure alignment with conversation context
-        total_batches = 0
-        
-        train_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        for batch_idx, (batch_sequences, sequence_lengths) in enumerate(train_iter):
-            optimizer.zero_grad()
-            
-            batch_loss = 0
-            batch_emotional_coherence = 0
-            batch_contextual_alignment = 0
-            
-            # Process each sequence in the batch
-            for i in range(batch_sequences.size(0)):
-                seq_len = sequence_lengths[i]
-                sequence = batch_sequences[i, :seq_len].to(device)  # Move sequence to device
-                
-                ees.previous_state = None
-                memory_context = torch.zeros(1, input_dim, device=device)  # Use device parameter
-                
-                # Process each utterance
-                for utterance_embedding in sequence:
-                    utterance_embedding = utterance_embedding.to(device)  # Ensure on device
-                    bert_context = utterance_embedding
-                    
-                    # Compute loss
-                    loss = ees.compute_loss(
-                        utterance_embedding,
-                        bert_context,
-                        memory_context
-                    )
-                    batch_loss += loss
-                    
-                    # Update memory
-                    memory_context = memory_system(
-                        utterance_embedding,
-                        memory_context
-                    )
-                    
-                    # Compute emotional coherence and contextual alignment
-                    if ees.previous_state is not None:
-                        emotional_coherence = ees.emotional_transition_loss(
-                            ees.previous_state,
-                            utterance_embedding
-                        )
-                        batch_emotional_coherence += emotional_coherence.item()
-                        
-                        context_alignment = ees.contextual_alignment_loss(
-                            utterance_embedding,
-                            [ees.previous_state, memory_context]
-                        )
-                        batch_contextual_alignment += context_alignment.item()
-                    
-                    ees.previous_state = utterance_embedding
-            
-            # Average loss over batch
-            batch_loss = batch_loss / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            batch_emotional_coherence = batch_emotional_coherence / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            batch_contextual_alignment = batch_contextual_alignment / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            
-            batch_loss.backward()
-            optimizer.step()
-            
-            # Update metrics
-            total_loss += batch_loss.item()
-            total_emotional_coherence += batch_emotional_coherence
-            total_contextual_alignment += batch_contextual_alignment
-            total_batches += 1
-            
-            # Update progress bar
-            train_iter.set_postfix({
-                'Loss': f'{batch_loss.item():.4f}',
-                'E-Coherence': f'{batch_emotional_coherence:.4f}',
-                'C-Alignment': f'{batch_contextual_alignment:.4f}'
-            })
-        
-        # Calculate epoch averages
-        avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
-        avg_coherence = total_emotional_coherence / total_batches if total_batches > 0 else float('inf')
-        avg_alignment = total_contextual_alignment / total_batches if total_batches > 0 else float('inf')
-        
-        logger.info(f"Epoch {epoch+1} - Average Loss: {avg_loss:.4f}, Emotional Coherence: {avg_coherence:.4f}, Contextual Alignment: {avg_alignment:.4f}")
-        
-        # Validation
-        if val_dataset:
-            val_loss, val_emotional_coherence, val_contextual_alignment = validate_ees(ees, memory_system, val_loader, device)
-            logger.info(f"Validation Loss: {val_loss:.4f}, Emotional Coherence: {val_emotional_coherence:.4f}, Contextual Alignment: {val_contextual_alignment:.4f}")
-            
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save({
-                    'ees_state_dict': ees.state_dict(),
-                    'memory_state_dict': memory_system.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'val_loss': val_loss
-                }, f"{checkpoint_dir}/best_model.pt")
-                logger.info(f"Saved checkpoint for epoch {epoch+1}")
+    start_time = time.time()
+    process = psutil.Process()
     
-    return ees, memory_system
+    logger.info(f"Starting training with {num_epochs} epochs")
+    logger.info(f"Initial memory usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
+    try:
+        for epoch in range(num_epochs):
+            epoch_start = time.time()
+            train_loss = 0
+            num_batches = 0
+            
+            # Training loop
+            ees.train()
+            memory_system.train()
+            
+            for batch_idx, (sequences, lengths) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
+                try:
+                    sequences = sequences.to(device)
+                    lengths = lengths.to(device)
+                    
+                    # Forward pass
+                    optimizer.zero_grad()
+                    loss = ees(sequences, lengths, memory_system)
+                    
+                    # Backward pass
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(ees.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(memory_system.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    
+                    train_loss += loss.item()
+                    num_batches += 1
+                    
+                    # Clear memory
+                    del sequences, lengths, loss
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    
+                except Exception as batch_error:
+                    logger.error(f"Error processing batch {batch_idx}: {str(batch_error)}")
+                    continue
+            
+            avg_train_loss = train_loss / num_batches if num_batches > 0 else float('inf')
+            
+            # Validation
+            if val_dataset:
+                val_loss = validate_ees(ees, memory_system, val_loader, device)
+                
+                # Save checkpoint if validation loss improved
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint_path = checkpoint_dir / f"best_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+                    torch.save({
+                        'epoch': epoch,
+                        'ees_state_dict': ees.state_dict(),
+                        'memory_system_state_dict': memory_system.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'val_loss': val_loss,
+                    }, checkpoint_path)
+                    logger.info(f"Saved best model checkpoint to {checkpoint_path}")
+            
+            # Log epoch metrics
+            epoch_time = time.time() - epoch_start
+            current_memory = process.memory_info().rss / 1024 / 1024
+            logger.info(f"Epoch {epoch+1}/{num_epochs}:")
+            logger.info(f"  Train Loss: {avg_train_loss:.4f}")
+            if val_dataset:
+                logger.info(f"  Val Loss: {val_loss:.4f}")
+            logger.info(f"  Time: {epoch_time:.2f}s")
+            logger.info(f"  Memory: {current_memory:.2f} MB")
+            
+            # Clear memory after each epoch
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    except Exception as e:
+        logger.error(f"Training error: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Log final training metrics
+        total_time = time.time() - start_time
+        final_memory = process.memory_info().rss / 1024 / 1024
+        logger.info(f"Training completed in {total_time/60:.2f} minutes")
+        logger.info(f"Final memory usage: {final_memory:.2f} MB")
+        
+        # Cleanup
+        train_dataset.cleanup()
+        if val_dataset:
+            val_dataset.cleanup()
 
 def validate_ees(ees, memory_system, val_loader, device):
     ees.eval()
     memory_system.eval()
     total_loss = 0
-    total_emotional_coherence = 0
-    total_contextual_alignment = 0
     total_batches = 0
     
     with torch.no_grad():
         for batch_idx, (batch_sequences, sequence_lengths) in enumerate(val_loader):
             batch_loss = 0
-            batch_emotional_coherence = 0
-            batch_contextual_alignment = 0
             
             # Process each sequence in the batch
             for i in range(batch_sequences.size(0)):
@@ -480,100 +546,73 @@ def validate_ees(ees, memory_system, val_loader, device):
                         memory_context
                     )
                     
-                    # Compute emotional coherence and contextual alignment
-                    if ees.previous_state is not None:
-                        emotional_coherence = ees.emotional_transition_loss(
-                            ees.previous_state,
-                            utterance_embedding
-                        )
-                        batch_emotional_coherence += emotional_coherence.item()
-                        
-                        context_alignment = ees.contextual_alignment_loss(
-                            utterance_embedding,
-                            [ees.previous_state, memory_context]
-                        )
-                        batch_contextual_alignment += context_alignment.item()
-                    
                     ees.previous_state = utterance_embedding
             
             # Average loss over batch
             batch_loss = batch_loss / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            batch_emotional_coherence = batch_emotional_coherence / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            batch_contextual_alignment = batch_contextual_alignment / (batch_sequences.size(0) * sequence_lengths.float().mean())
             
             total_loss += batch_loss.item()
-            total_emotional_coherence += batch_emotional_coherence
-            total_contextual_alignment += batch_contextual_alignment
             total_batches += 1
     
     avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
-    avg_coherence = total_emotional_coherence / total_batches if total_batches > 0 else float('inf')
-    avg_alignment = total_contextual_alignment / total_batches if total_batches > 0 else float('inf')
     
-    return avg_loss, avg_coherence, avg_alignment
+    return avg_loss
 
 if __name__ == "__main__":
     try:
         # Initialize logging
         logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
         
-        # Set up device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Set up the device
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
         
-        # Training parameters
-        batch_size = 16
-        max_sessions = 10000
+        # Initialize the tokenizer and model
+        tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        model = AutoModel.from_pretrained('bert-base-uncased').to(device)
         
-        # Initialize datasets with proper resource management
-        train_dataset = None
-        val_dataset = None
+        # Set up data directory
+        data_dir = os.path.join(project_root, "data", "generated_sessions")
+        if not os.path.exists(data_dir):
+            raise ValueError(f"Data directory not found: {data_dir}")
         
-        try:
-            train_dataset = TherapySessionDataset(
-                data_dir="data/generated_sessions",
-                tokenizer=AutoTokenizer.from_pretrained('bert-base-uncased'),
-                model=AutoModel.from_pretrained('bert-base-uncased'),
-                device=device,
-                max_sessions=max_sessions,
-                validation=False,
-                batch_size=batch_size,
-                checkpoint_dir="data/checkpoints"
-            )
-            
-            val_dataset = TherapySessionDataset(
-                data_dir="data/generated_sessions",
-                tokenizer=AutoTokenizer.from_pretrained('bert-base-uncased'),
-                model=AutoModel.from_pretrained('bert-base-uncased'),
-                device=device,
-                max_sessions=max_sessions // 5,  # Smaller validation set
-                validation=True,
-                batch_size=batch_size,
-                checkpoint_dir="data/checkpoints"
-            )
-            
-            # Train the model
-            train_ees(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                device=device,
-                batch_size=batch_size,
-                num_epochs=10,
-                learning_rate=1e-4
-            )
-            
-        finally:
-            # Cleanup resources
-            if train_dataset is not None:
-                train_dataset.cleanup()
-            if val_dataset is not None:
-                val_dataset.cleanup()
-            
-            # Force cleanup of any remaining multiprocessing resources
-            import multiprocessing
-            if hasattr(multiprocessing, '_cleanup'):
-                multiprocessing._cleanup()
-            
+        logger.info(f"Loading data from: {data_dir}")
+        
+        # Create datasets
+        train_dataset = TherapySessionDataset(
+            data_dir=data_dir,
+            tokenizer=tokenizer,
+            model=model,
+            device=device,
+            validation=False
+        )
+        
+        val_dataset = TherapySessionDataset(
+            data_dir=data_dir,
+            tokenizer=tokenizer,
+            model=model,
+            device=device,
+            validation=True
+        )
+        
+        if len(train_dataset) == 0:
+            raise ValueError("Training dataset is empty. Please ensure there are files in the data directory matching the pattern 'client_*.json'")
+        
+        # Train the model
+        train_ees(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            device=device
+        )
+        
     except Exception as e:
         logger.error(f"Training failed: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
+    finally:
+        # Cleanup
+        if 'train_dataset' in locals():
+            train_dataset.cleanup()
+        if 'val_dataset' in locals():
+            val_dataset.cleanup()
