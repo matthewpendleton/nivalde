@@ -21,6 +21,8 @@ pytorch-lightning>=2.0.0
 # Visualization and Monitoring
 tensorboard>=2.13.0
 wandb>=0.15.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
 
 # API and Services
 uvicorn>=0.22.0

@@ -53,28 +53,38 @@ class Transformer2Memory(nn.Module):
                         prior_memories: Optional[torch.Tensor] = None) -> float:
         """Compute surprise/novelty score for new memory.
         
-        The score is based on the negative log probability of the memory
-        given prior memories.
+        The score is based on cosine similarity with prior memories.
+        A high surprise score means the memory is very different from prior memories.
         
         Args:
             new_memory: New memory embedding
             prior_memories: Optional tensor of prior memories
             
         Returns:
-            Surprise score for the new memory
+            Surprise score for the new memory (0 to 1, where 1 is most surprising)
         """
         if prior_memories is None or len(prior_memories) == 0:
             return 1.0  # Maximum surprise for first memory
             
-        # Compute attention scores with prior memories
-        attn_scores = torch.matmul(
-            new_memory, 
-            prior_memories.transpose(-2, -1)
-        ) / math.sqrt(new_memory.size(-1))
+        # Ensure proper dimensions
+        new_memory = new_memory.view(-1)  # Flatten to 1D
+        if len(prior_memories.shape) == 1:
+            prior_memories = prior_memories.unsqueeze(0)  # Add batch dimension
+        elif len(prior_memories.shape) > 2:
+            prior_memories = prior_memories.view(-1, prior_memories.size(-1))
+            
+        # Normalize vectors for cosine similarity
+        new_memory_norm = new_memory / new_memory.norm()
+        prior_memories_norm = prior_memories / prior_memories.norm(dim=1, keepdim=True)
+            
+        # Compute cosine similarities (new_memory: [dim] x prior_memories: [num_mems, dim])
+        similarities = torch.matmul(prior_memories_norm, new_memory_norm)
         
-        # Negative log probability as surprise score
-        prob = torch.softmax(attn_scores, dim=-1).max()
-        return -torch.log(prob).item()
+        # Get minimum distance (maximum similarity)
+        max_similarity = similarities.max()
+        
+        # Convert to surprise score (1 = most surprising, 0 = least surprising)
+        return (1 - max_similarity).item()
     
     def store_memory(self, memory: torch.Tensor):
         """Store new memory with its surprise score.

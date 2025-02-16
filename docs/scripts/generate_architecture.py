@@ -9,7 +9,6 @@ os.makedirs(output_dir, exist_ok=True)
 dot = Digraph(comment='Nivalde Architecture', format='png')
 dot.attr(rankdir='TB')  # Top to bottom layout
 dot.attr('node', shape='box', style='rounded,filled', fillcolor='white', margin='0.3,0.2')
-dot.attr(splines='ortho')  # Orthogonal edges for cleaner look
 
 # Define node styles
 MAIN_NODE = {'shape': 'box', 'style': 'rounded,filled', 'fillcolor': 'lightgray'}
@@ -61,20 +60,35 @@ with dot.subgraph(name='cluster_response') as resp:
     resp.edge('rl', 'gpt')
     resp.edge('gpt', 'test')
 
+# Set default edge attributes
+dot.attr('edge', splines='ortho')
+
 # Main connections between components
 dot.edge('bert', 'ees', xlabel='Emotional\nContext')  # BERT directly to EES
 dot.edge('bert', 't2', xlabel='Contextual\nInformation')  # BERT also feeds T²
 dot.edge('t2', 'ees', xlabel='Memory\nContext')  # T² also connects to EES
 dot.edge('tsm', 'rl', xlabel='Therapeutic\nStrategy')
 
-# Feedback loops
-dot.edge('test', 'input', xlabel='Client\nFeedback', style='dashed', constraint='false')
-dot.edge('test', 't2', xlabel='Memory\nUpdate', style='dashed', constraint='false')
-dot.edge('rl', 'tsm', xlabel='Policy\nUpdate', style='dotted', constraint='false')
+# Feedback loops (with adjusted constraints and headports/tailports for better label placement)
+dot.edge('test', 'input', xlabel='Client\nFeedback', style='dashed', 
+        constraint='false', tailport='w', headport='e')
+dot.edge('test', 't2', xlabel='Memory\nUpdate', style='dashed',
+        constraint='false', tailport='w', headport='e')
+
+# Special handling for the policy update edge
+dot.edge('rl', 'tsm', 
+        xlabel='Policy\nUpdate', 
+        style='dotted',
+        constraint='false', 
+        tailport='n', 
+        headport='s',
+        minlen='2',  # Minimum length between nodes
+        weight='0.1',  # Lower weight to allow more flexibility in placement
+        splines='curved')  # Use curved splines for this edge
 
 # Graph attributes for better layout
-dot.attr(ranksep='1.0')
-dot.attr(nodesep='0.75')
+dot.attr(ranksep='1.2')  # Increased spacing between ranks
+dot.attr(nodesep='0.8')  # Increased spacing between nodes
 dot.attr(concentrate='true')
 
 # Save to the correct location

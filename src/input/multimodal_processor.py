@@ -5,11 +5,12 @@ import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from transformers import AutoTokenizer, AutoModel
 from ..models.contextual_processor import ContextualProcessor
 
 @dataclass
 class MultimodalInput:
-    audio_embedding: torch.Tensor
+    audio_embedding: Optional[torch.Tensor]
     video_embedding: Optional[torch.Tensor]
     text_embedding: Optional[torch.Tensor]
     contextual_embedding: Optional[torch.Tensor] = None
@@ -30,9 +31,45 @@ class AudioEncoder(nn.Module):
         x = self.projection(x.mean(0))  # Average pooling over sequence
         return x
 
+class TextEncoder:
+    def __init__(self, model_name: str = "bhadresh-savani/bert-base-go-emotion"):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.model.eval()  # Set to evaluation mode
+        
+    def mean_pooling(self, model_output, attention_mask):
+        """Mean pooling - take attention mask into account for correct averaging"""
+        token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+        return sum_embeddings / sum_mask
+        
+    def encode(self, text: str, max_length: int = 512) -> torch.Tensor:
+        """Encode text into emotion-aware embeddings"""
+        # Tokenize and prepare input
+        inputs = self.tokenizer(
+            text,
+            max_length=max_length,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        # Generate embeddings
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            # Use mean pooling with attention masking
+            embeddings = self.mean_pooling(outputs, inputs['attention_mask'])
+            # Normalize embeddings
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+            
+        return embeddings
+
 class MultimodalProcessor:
     def __init__(self, audio_embedding_dim: int = 256, contextual_dim: int = 768):
         self.audio_encoder = AudioEncoder(input_dim=1024, embedding_dim=audio_embedding_dim)
+        self.text_encoder = TextEncoder()
         self.contextual_processor = ContextualProcessor(embedding_dim=contextual_dim)
         self.audio_buffer = []
         self.is_recording = False
@@ -69,25 +106,30 @@ class MultimodalProcessor:
         """Process raw audio directly to embeddings"""
         with torch.no_grad():
             return self.audio_encoder(audio_data)
+    
+    def process_text(self, text: str) -> torch.Tensor:
+        """Process text input to embeddings"""
+        return self.text_encoder.encode(text)
             
     def process_input(self, 
                      audio_data: Optional[torch.Tensor] = None,
                      video_frame: Optional[np.ndarray] = None,
                      text: Optional[str] = None) -> MultimodalInput:
         """Process multimodal input and return embeddings with contextual understanding"""
+        # Process available modalities
         audio_embedding = self.process_audio(audio_data) if audio_data is not None else None
-        # Video and text processing to be implemented based on specific requirements
+        text_embedding = self.process_text(text) if text is not None else None
         
         # Get contextual embedding using BERT
         contextual_embedding = self.contextual_processor.process(
             audio_embedding=audio_embedding,
             video_embedding=None,  # Placeholder for video processing
-            text_embedding=None    # Placeholder for text processing
+            text_embedding=text_embedding
         )
         
         return MultimodalInput(
             audio_embedding=audio_embedding,
             video_embedding=None,  # Placeholder for video processing
-            text_embedding=None,   # Placeholder for text processing
+            text_embedding=text_embedding,
             contextual_embedding=contextual_embedding
         )

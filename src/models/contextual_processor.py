@@ -29,7 +29,7 @@ class MultimodalBertEncoder(nn.Module):
         # Modality-specific projection layers
         self.audio_projection = nn.Linear(256, embedding_dim)  # Assuming audio_dim=256
         self.video_projection = nn.Linear(512, embedding_dim)  # Assuming video_dim=512
-        self.text_projection = nn.Linear(768, embedding_dim)   # Standard BERT dim
+        self.text_projection = nn.Linear(768, embedding_dim)   # Back to 768 for emotion BERT
         
         # Modality type embeddings
         self.modality_embeddings = nn.Embedding(3, embedding_dim)
@@ -49,56 +49,56 @@ class MultimodalBertEncoder(nn.Module):
         modality_ids = []
         attention_mask = []
         
-        # Process audio
+        # Process available modalities
         if audio_embedding is not None:
             audio_proj = self.audio_projection(audio_embedding)
             sequence.append(audio_proj)
-            modality_ids.extend([0] * audio_proj.size(1))
-            attention_mask.extend([1] * audio_proj.size(1))
+            modality_ids.extend([0] * audio_proj.size(0))
+            attention_mask.extend([1] * audio_proj.size(0))
             
-        # Process video
         if video_embedding is not None:
             video_proj = self.video_projection(video_embedding)
             sequence.append(video_proj)
-            modality_ids.extend([1] * video_proj.size(1))
-            attention_mask.extend([1] * video_proj.size(1))
+            modality_ids.extend([1] * video_proj.size(0))
+            attention_mask.extend([1] * video_proj.size(0))
             
-        # Process text
         if text_embedding is not None:
             text_proj = self.text_projection(text_embedding)
             sequence.append(text_proj)
-            modality_ids.extend([2] * text_proj.size(1))
-            attention_mask.extend([1] * text_proj.size(1))
+            modality_ids.extend([2] * text_proj.size(0))
+            attention_mask.extend([1] * text_proj.size(0))
+        
+        # Handle case where no modalities are present
+        if not sequence:
+            return torch.zeros((1, self.config.hidden_size)), torch.zeros((1,))
             
-        # Combine all modalities
-        sequence = torch.cat(sequence, dim=1)
+        # Concatenate all modalities
+        sequence = torch.cat(sequence, dim=0)
         modality_ids = torch.tensor(modality_ids, device=sequence.device)
         attention_mask = torch.tensor(attention_mask, device=sequence.device)
         
-        return sequence, modality_ids, attention_mask
+        return sequence, attention_mask, modality_ids
         
     def forward(self,
                 audio_embedding: Optional[torch.Tensor] = None,
                 video_embedding: Optional[torch.Tensor] = None,
                 text_embedding: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Process multimodal input through BERT"""
-        # Project inputs to common embedding space
-        sequence, modality_ids, attention_mask = self.project_inputs(
+        # Project inputs to common space
+        sequence, attention_mask, modality_ids = self.project_inputs(
             audio_embedding, video_embedding, text_embedding
         )
         
-        # Add modality type embeddings
-        modality_embeddings = self.modality_embeddings(modality_ids)
-        sequence = sequence + modality_embeddings
+        # Add modality embeddings
+        sequence = sequence + self.modality_embeddings(modality_ids)
         
         # Process through BERT
         outputs = self.bert(
-            inputs_embeds=sequence,
-            attention_mask=attention_mask.unsqueeze(0),
-            return_dict=True
+            inputs_embeds=sequence.unsqueeze(0),
+            attention_mask=attention_mask.unsqueeze(0)
         )
         
-        # Use pooled output as contextual representation
+        # Return pooled output (CLS token)
         return outputs.pooler_output
 
 class ContextualProcessor:
@@ -110,8 +110,9 @@ class ContextualProcessor:
                 video_embedding: Optional[torch.Tensor] = None,
                 text_embedding: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Process multimodal input and return contextual embedding"""
-        return self.encoder(
-            audio_embedding=audio_embedding,
-            video_embedding=video_embedding,
-            text_embedding=text_embedding
-        )
+        with torch.no_grad():
+            return self.encoder(
+                audio_embedding=audio_embedding,
+                video_embedding=video_embedding,
+                text_embedding=text_embedding
+            )
