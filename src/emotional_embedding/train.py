@@ -8,8 +8,11 @@ from tqdm import tqdm
 import logging
 import json
 import glob
+import random
 from transformers import AutoTokenizer, AutoModel
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Iterator
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
 from src.emotional_embedding.ees import EmotionalEmbeddingSpace
 from src.memory.memory_system import TransformerMemorySystem
@@ -17,90 +20,168 @@ from src.memory.memory_system import TransformerMemorySystem
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def load_therapy_sessions(data_dir: str) -> List[Dict]:
-    """Load therapy sessions from generated JSON files.
+class TherapySessionDataset(Dataset):
+    """Dataset for therapy sessions with batching support."""
     
-    Args:
-        data_dir: Directory containing generated session files
+    def __init__(
+        self,
+        data_dir: str,
+        tokenizer: AutoTokenizer,
+        model: AutoModel,
+        device: str,
+        max_sessions: int = None,
+        validation: bool = False,
+        val_ratio: float = 0.1,
+        batch_size: int = 16,
+        cache_size: int = 1000  # Number of sessions to cache in memory
+    ):
+        self.data_dir = data_dir
+        self.tokenizer = tokenizer
+        self.model = model
+        self.device = device
+        self.max_sessions = max_sessions
+        self.validation = validation
+        self.batch_size = batch_size
+        self.cache_size = cache_size
         
-    Returns:
-        List of session dictionaries
-    """
-    sessions = []
-    for filepath in tqdm(glob.glob(f"{data_dir}/client_*.json"), desc="Loading sessions"):
-        with open(filepath, 'r') as f:
-            client_sessions = json.load(f)
-            sessions.extend(client_sessions)
-    return sessions
-
-def preprocess_sessions(
-    sessions: List[Dict],
-    tokenizer: AutoTokenizer,
-    model: AutoModel,
-    device: str
-) -> List[List[torch.Tensor]]:
-    """Preprocess therapy sessions into BERT embeddings.
-    
-    Args:
-        sessions: List of session dictionaries
-        tokenizer: BERT tokenizer
-        model: BERT model
-        device: Device to compute embeddings on
+        # Get list of all client files
+        self.files = sorted(glob.glob(f"{data_dir}/client_*.json"))
+        if max_sessions:
+            random.shuffle(self.files)
+            num_files = int(max_sessions / 10)  # Each file has 10 sessions
+            self.files = self.files[:num_files]
         
-    Returns:
-        List of embedded dialogue sequences
-    """
-    embedded_sequences = []
+        # Split files for validation
+        split_idx = int(len(self.files) * (1 - val_ratio))
+        self.files = self.files[split_idx:] if validation else self.files[:split_idx]
+        
+        # Initialize cache
+        self.cache = []
+        self.cache_indices = set()
+        self._fill_cache()
     
-    for session in tqdm(sessions, desc="Processing sessions"):
-        sequence = []
-        for utterance in session['dialog']:
-            # Tokenize and get BERT embedding
-            inputs = tokenizer(
-                utterance,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=512
-            ).to(device)
+    def _fill_cache(self):
+        """Fill the cache with preprocessed sessions."""
+        logger.info(f"Processing sessions for {'validation' if self.validation else 'training'} dataset")
+        logger.info(f"Target cache size: {self.cache_size}, Files to process: {len(self.files)}")
+        
+        pbar = tqdm(total=self.cache_size, desc="Processing sessions")
+        
+        # Process files in batches for efficiency
+        batch_utterances = []
+        batch_indices = []
+        max_batch_size = 32  # Process 32 utterances at once
+        
+        while len(self.cache) < self.cache_size and self.files:
+            file_path = self.files.pop(0)
+            logger.debug(f"Processing file: {file_path}")
             
-            with torch.no_grad():
-                outputs = model(**inputs)
-                # Use CLS token embedding
-                embedding = outputs.last_hidden_state[:, 0, :]
-                sequence.append(embedding)
+            try:
+                with open(file_path, 'r') as f:
+                    sessions = json.load(f)
+                    for session in sessions:
+                        if len(self.cache) >= self.cache_size:
+                            break
+                        
+                        # Collect utterances for batch processing
+                        sequence = []
+                        for utterance in session['dialog']:
+                            batch_utterances.append(utterance)
+                            batch_indices.append(len(sequence))
+                            sequence.append(None)  # Placeholder
+                            
+                            # Process batch when it reaches max size
+                            if len(batch_utterances) >= max_batch_size:
+                                embeddings = self._process_utterance_batch(batch_utterances)
+                                self._update_sequences(embeddings, batch_indices, sequence)
+                                batch_utterances = []
+                                batch_indices = []
+                        
+                        # Process remaining utterances in the session
+                        if batch_utterances:
+                            embeddings = self._process_utterance_batch(batch_utterances)
+                            self._update_sequences(embeddings, batch_indices, sequence)
+                            batch_utterances = []
+                            batch_indices = []
+                        
+                        self.cache.append(sequence)
+                        pbar.update(1)
+                        
+            except Exception as e:
+                logger.error(f"Error processing file {file_path}: {str(e)}")
+                continue
         
-        embedded_sequences.append(sequence)
+        pbar.close()
+        logger.info(f"Cached {len(self.cache)} sessions")
     
-    return embedded_sequences
+    def _process_utterance_batch(self, utterances):
+        """Process a batch of utterances through BERT."""
+        inputs = self.tokenizer(
+            utterances,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512
+        ).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            return outputs.last_hidden_state[:, 0, :]
+    
+    def _update_sequences(self, embeddings, indices, sequence):
+        """Update sequence with computed embeddings."""
+        for embedding, idx in zip(embeddings, indices):
+            sequence[idx] = embedding
+    
+    def __len__(self):
+        return len(self.cache)
+    
+    def __getitem__(self, idx):
+        if idx not in self.cache_indices and len(self.cache) < self.cache_size:
+            self._fill_cache()
+        return self.cache[idx]
+
+def collate_sessions(batch: List[List[torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Collate function for batching sessions.
+    
+    Args:
+        batch: List of sequences, where each sequence is a list of utterance embeddings
+        
+    Returns:
+        Tuple of (padded_sequences, sequence_lengths)
+    """
+    # Get sequence lengths
+    lengths = [len(seq) for seq in batch]
+    max_len = max(lengths)
+    
+    # Pad sequences
+    padded_seqs = []
+    for seq in batch:
+        # Pad with zero embeddings if sequence is shorter than max_len
+        if len(seq) < max_len:
+            padding = [torch.zeros_like(seq[0]) for _ in range(max_len - len(seq))]
+            seq.extend(padding)
+        padded_seqs.append(torch.stack(seq))
+    
+    # Stack into batch
+    padded_batch = torch.stack(padded_seqs)
+    lengths_tensor = torch.tensor(lengths, device=padded_batch.device)
+    
+    return padded_batch, lengths_tensor
 
 def train_ees(
-    train_sequences,
-    val_sequences=None,
-    input_dim=768,
-    latent_dim=32,
-    hidden_dim=128,
-    batch_size=16,
-    num_epochs=100,
-    learning_rate=1e-4,
-    device="cuda" if torch.cuda.is_available() else "cpu"
+    train_dataset: TherapySessionDataset,
+    val_dataset: TherapySessionDataset = None,
+    input_dim: int = 768,
+    latent_dim: int = 32,
+    hidden_dim: int = 128,
+    batch_size: int = 16,
+    num_epochs: int = 100,
+    learning_rate: float = 1e-4,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 ):
-    """Train the Emotional Embedding Space model.
+    """Train the Emotional Embedding Space model using batched data."""
     
-    Args:
-        train_sequences: List of dialogue sequences for training
-        val_sequences: Optional validation sequences
-        input_dim: Input dimension size
-        latent_dim: Latent space dimension size
-        hidden_dim: Hidden layer dimension size
-        batch_size: Training batch size
-        num_epochs: Number of training epochs
-        learning_rate: Learning rate for optimization
-        device: Device to train on
-        
-    Returns:
-        Trained EES model
-    """
     # Initialize models
     ees = EmotionalEmbeddingSpace(
         input_dim=input_dim,
@@ -118,34 +199,51 @@ def train_ees(
         lr=learning_rate
     )
     
+    # Create data loaders with batching
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_sessions
+    )
+    
+    if val_dataset:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_sessions
+        )
+    
+    logger.info(f"Starting training with {num_epochs} epochs")
+    
     # Training loop
     best_val_loss = float('inf')
     for epoch in range(num_epochs):
+        logger.info(f"\nEpoch {epoch+1}/{num_epochs}")
         ees.train()
         memory_system.train()
         
-        # Shuffle training sequences
-        np.random.shuffle(train_sequences)
-        
-        # Process sequences in batches
         total_loss = 0
         num_batches = 0
         
-        for i in tqdm(range(0, len(train_sequences), batch_size), desc=f"Epoch {epoch+1}/{num_epochs}"):
-            batch_sequences = train_sequences[i:i + batch_size]
-            batch_loss = 0
-            
+        train_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        for batch_idx, (batch_sequences, sequence_lengths) in enumerate(train_iter):
             optimizer.zero_grad()
             
-            # Process each sequence
-            for sequence in batch_sequences:
+            batch_loss = 0
+            
+            # Process each sequence in the batch
+            for i in range(batch_sequences.size(0)):
+                seq_len = sequence_lengths[i]
+                sequence = batch_sequences[i, :seq_len]  # Only use non-padded parts
+                
                 # Reset state for new sequence
                 ees.previous_state = None
                 memory_context = torch.zeros(1, input_dim).to(device)
                 
                 # Process each utterance
                 for utterance_embedding in sequence:
-                    # Get BERT context (using same embedding for now)
                     bert_context = utterance_embedding
                     
                     # Compute loss
@@ -163,24 +261,28 @@ def train_ees(
                     )
             
             # Average loss over batch
-            batch_loss = batch_loss / (len(batch_sequences) * len(batch_sequences[0]))
+            batch_loss = batch_loss / (batch_sequences.size(0) * sequence_lengths.float().mean())
             batch_loss.backward()
             optimizer.step()
             
             total_loss += batch_loss.item()
             num_batches += 1
             
+            if batch_idx % 10 == 0:
+                logger.info(f"Batch {batch_idx}: Loss = {batch_loss.item():.4f}")
+            
+            train_iter.set_postfix({'loss': batch_loss.item()})
+        
         avg_loss = total_loss / num_batches
-        logger.info(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
+        logger.info(f"Epoch {epoch+1} - Average Loss: {avg_loss:.4f}")
         
         # Validation
-        if val_sequences:
-            val_loss = validate_ees(ees, memory_system, val_sequences, device)
+        if val_dataset:
+            val_loss = validate_ees(ees, memory_system, val_loader, device)
             logger.info(f"Validation Loss: {val_loss:.4f}")
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                # Save checkpoint
                 torch.save({
                     'ees_state_dict': ees.state_dict(),
                     'memory_state_dict': memory_system.state_dict(),
@@ -188,68 +290,98 @@ def train_ees(
                     'epoch': epoch,
                     'val_loss': val_loss
                 }, 'checkpoints/best_model.pt')
+                logger.info(f"Saved checkpoint for epoch {epoch+1}")
     
     return ees, memory_system
 
-def validate_ees(ees, memory_system, val_sequences, device):
-    """Validate the EES model on validation sequences."""
+def validate_ees(ees, memory_system, val_loader, device):
+    """Validate the EES model using batched validation data."""
     ees.eval()
     memory_system.eval()
     total_loss = 0
-    num_sequences = len(val_sequences)
+    num_batches = 0
     
     with torch.no_grad():
-        for sequence in val_sequences:
-            ees.previous_state = None
-            memory_context = torch.zeros(1, ees.input_dim).to(device)
-            sequence_loss = 0
+        for batch_idx, (batch_sequences, sequence_lengths) in enumerate(val_loader):
+            batch_loss = 0
             
-            for utterance_embedding in sequence:
-                bert_context = utterance_embedding
-                loss = ees.compute_loss(
-                    utterance_embedding,
-                    bert_context,
-                    memory_context
-                )
-                sequence_loss += loss
-                memory_context = memory_system(
-                    utterance_embedding,
-                    memory_context
-                )
+            # Process each sequence in the batch
+            for i in range(batch_sequences.size(0)):
+                seq_len = sequence_lengths[i]
+                sequence = batch_sequences[i, :seq_len]
+                
+                ees.previous_state = None
+                memory_context = torch.zeros(1, ees.input_dim).to(device)
+                
+                for utterance_embedding in sequence:
+                    bert_context = utterance_embedding
+                    loss = ees.compute_loss(
+                        utterance_embedding,
+                        bert_context,
+                        memory_context
+                    )
+                    batch_loss += loss
+                    memory_context = memory_system(
+                        utterance_embedding,
+                        memory_context
+                    )
             
-            total_loss += sequence_loss / len(sequence)
-    
-    return total_loss / num_sequences
+            batch_loss = batch_loss / (batch_sequences.size(0) * sequence_lengths.float().mean())
+            total_loss += batch_loss.item()
+            num_batches += 1
+        
+        return total_loss / num_batches
 
 if __name__ == "__main__":
     # Initialize BERT model and tokenizer
+    logger.info("Initializing BERT model and tokenizer...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     bert_model = AutoModel.from_pretrained("bert-base-uncased").to(device)
+    logger.info("BERT initialization complete")
     
-    # Load and preprocess sessions
-    logger.info("Loading therapy sessions...")
-    sessions = load_therapy_sessions("data/generated_sessions")
+    # Create datasets with batching
+    logger.info("Creating training and validation datasets...")
+    max_sessions = 10000  # Limit to 10k sessions for initial training
+    batch_size = 16
+    logger.info(f"Using batch size: {batch_size}, max sessions: {max_sessions}")
     
-    # Split into train/val
-    np.random.shuffle(sessions)
-    split_idx = int(len(sessions) * 0.9)  # 90% train, 10% val
-    train_sessions = sessions[:split_idx]
-    val_sessions = sessions[split_idx:]
+    logger.info("Initializing training dataset...")
+    train_dataset = TherapySessionDataset(
+        data_dir="data/generated_sessions",
+        tokenizer=tokenizer,
+        model=bert_model,
+        device=device,
+        max_sessions=max_sessions,
+        validation=False,
+        batch_size=batch_size
+    )
+    logger.info(f"Training dataset initialized with {len(train_dataset)} sessions")
     
-    logger.info("Preprocessing sessions...")
-    train_sequences = preprocess_sessions(train_sessions, tokenizer, bert_model, device)
-    val_sequences = preprocess_sessions(val_sessions, tokenizer, bert_model, device)
+    logger.info("Initializing validation dataset...")
+    val_dataset = TherapySessionDataset(
+        data_dir="data/generated_sessions",
+        tokenizer=tokenizer,
+        model=bert_model,
+        device=device,
+        max_sessions=max_sessions,
+        validation=True,
+        batch_size=batch_size
+    )
+    logger.info(f"Validation dataset initialized with {len(val_dataset)} sessions")
     
     # Create checkpoints directory
     Path("checkpoints").mkdir(exist_ok=True)
+    logger.info("Created checkpoints directory")
     
     # Train model
     logger.info("Starting training...")
     ees, memory_system = train_ees(
-        train_sequences=train_sequences,
-        val_sequences=val_sequences,
-        device=device
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        device=device,
+        batch_size=batch_size
     )
     
     logger.info("Training complete!")
