@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 # Add project root to path
 project_root = str(Path(__file__).parent.parent)
@@ -139,6 +140,141 @@ def test_integration():
     for i in range(len(test_sentences)-1):
         print(f"Correlation {i} -> {i+1}: {corr_matrix[i,i+1]:.4f}")
 
+def test_emotional_memory_persistence():
+    """Test how well the Transformer² maintains emotional context over time."""
+    memory_system = Transformer2Memory(
+        dim=384,          # Emotional context dimension
+        num_layers=4,     # Fewer layers for faster processing
+        num_heads=6       # 64-dim per head for emotional aspects
+    )
+    
+    # Create sequence of related emotional states
+    joy = torch.tensor([0.8, 0.1, 0.0] * 128)  # High positive valence
+    contentment = torch.tensor([0.6, 0.2, 0.1] * 128)  # Moderate positive
+    neutral = torch.tensor([0.3, 0.3, 0.3] * 128)  # Neutral state
+    concern = torch.tensor([0.2, 0.5, 0.4] * 128)  # Slight negative
+    anxiety = torch.tensor([0.1, 0.7, 0.8] * 128)  # High negative
+    
+    # Store emotional sequence
+    emotional_sequence = [joy, contentment, neutral, concern, anxiety]
+    for emotion in emotional_sequence:
+        memory_system.store_memory(emotion)
+    
+    # Create sequence tensor for transformer
+    sequence = torch.stack(memory_system.memories)
+    
+    # Process through transformer
+    processed = memory_system.transformer(sequence)
+    
+    # Test retrieval with similar emotional state
+    test_joy = torch.tensor([0.75, 0.15, 0.05] * 128).unsqueeze(0)  # Add batch dim
+    
+    # Get attention weights for test state
+    with torch.no_grad():
+        # Self-attention with test state
+        test_sequence = torch.cat([sequence, test_joy])
+        processed_with_test = memory_system.transformer(test_sequence)
+        final_state = processed_with_test[-1]  # Get transformed test state
+        
+        # Compare similarities
+        joy_similarity = F.cosine_similarity(final_state, processed[0], dim=0)
+        anxiety_similarity = F.cosine_similarity(final_state, processed[-1], dim=0)
+    
+    # Context should be more similar to joy than anxiety
+    assert joy_similarity > anxiety_similarity
+    
+    print("\nEmotional Memory Test:")
+    print(f"Joy similarity: {joy_similarity:.3f}")
+    print(f"Anxiety similarity: {anxiety_similarity:.3f}")
+
+def test_emotional_transition_detection():
+    """Test Transformer²'s ability to detect significant emotional shifts."""
+    memory_system = Transformer2Memory(
+        dim=384,
+        num_layers=4,
+        num_heads=6
+    )
+    
+    # Create gradual transition
+    gradual_shift = [
+        torch.tensor([0.8 - 0.1*i, 0.1 + 0.1*i, 0.1] * 128)
+        for i in range(8)
+    ]
+    
+    # Store and get surprise scores for gradual transition
+    surprise_scores_gradual = []
+    for i, state in enumerate(gradual_shift):
+        # Skip first state for surprise computation
+        if i > 0:  # Only compute surprise after first memory
+            surprise = memory_system.compute_surprise(
+                state,
+                torch.stack(memory_system.memories)
+            )
+            surprise_scores_gradual.append(surprise)
+        memory_system.store_memory(state)
+    
+    print("\nGradual Transition Scores:")
+    for i, score in enumerate(surprise_scores_gradual):
+        print(f"Step {i+1}: {score:.3f}")
+    
+    # Reset memory system
+    memory_system = Transformer2Memory(
+        dim=384,
+        num_layers=4,
+        num_heads=6
+    )
+    
+    # Create sudden transition
+    sudden_shift = [
+        torch.tensor([0.8, 0.1, 0.1] * 128),  # Very positive
+        torch.tensor([0.1, 0.1, 0.8] * 128)   # Very negative
+    ]
+    
+    # Store and get surprise scores for sudden transition
+    surprise_scores_sudden = []
+    for i, state in enumerate(sudden_shift):
+        # Skip first state for surprise computation
+        if i > 0:  # Only compute surprise after first memory
+            surprise = memory_system.compute_surprise(
+                state,
+                torch.stack(memory_system.memories)
+            )
+            surprise_scores_sudden.append(surprise)
+        memory_system.store_memory(state)
+    
+    print("\nSudden Transition Scores:")
+    for i, score in enumerate(surprise_scores_sudden):
+        print(f"Step {i+1}: {score:.3f}")
+    
+    # Get maximum non-initial surprise scores
+    max_surprise_gradual = max(surprise_scores_gradual) if surprise_scores_gradual else 0
+    max_surprise_sudden = max(surprise_scores_sudden) if surprise_scores_sudden else 0
+    
+    print(f"\nMax Surprise Scores:")
+    print(f"Gradual: {max_surprise_gradual:.3f}")
+    print(f"Sudden:  {max_surprise_sudden:.3f}")
+    
+    # Sudden transition should show higher surprise
+    assert max_surprise_sudden > max_surprise_gradual, \
+        f"Sudden transition ({max_surprise_sudden:.3f}) should be more surprising than gradual ({max_surprise_gradual:.3f})"
+    
+    # Visualize surprise scores
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, len(surprise_scores_gradual) + 1), 
+             surprise_scores_gradual, 
+             'b-o', 
+             label='Gradual Transition')
+    plt.plot(len(surprise_scores_gradual) + 1, 
+             surprise_scores_sudden[0], 
+             'r-o', 
+             label='Sudden Transition')
+    plt.xlabel('Memory Step')
+    plt.ylabel('Surprise Score')
+    plt.title('Emotional Transition Detection')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 if __name__ == "__main__":
     print("Testing Transformer² Memory System...")
     
@@ -146,5 +282,7 @@ if __name__ == "__main__":
     test_surprise_computation()
     test_temporal_effects()
     test_integration()
+    test_emotional_memory_persistence()
+    test_emotional_transition_detection()
     
     print("\nAll tests completed!")

@@ -126,7 +126,8 @@ class TherapySessionDataset(Dataset):
         try:
             self.cleanup()
         except Exception as e:
-            logger.warning(f"Error during cleanup in __del__: {str(e)}")
+            import logging
+            logging.getLogger(__name__).warning(f"Error during cleanup in __del__: {str(e)}")
     
     def _load_or_create_cache(self):
         """Load cache from checkpoint if exists, otherwise create new cache."""
@@ -364,21 +365,26 @@ def collate_sessions(batch: List[List[torch.Tensor]]) -> Tuple[torch.Tensor, tor
     return padded, lengths
 
 def train_ees(
-    train_dataset: TherapySessionDataset,
-    val_dataset: TherapySessionDataset = None,
-    input_dim: int = 768,
-    latent_dim: int = 32,
-    hidden_dim: int = 128,
-    batch_size: int = 16,
-    num_epochs: int = 100,
-    learning_rate: float = 1e-4,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    checkpoint_dir: str = "checkpoints"
+    train_dataset,
+    val_dataset,
+    device,
+    input_dim=768,
+    hidden_dim=512,
+    latent_dim=64,
+    batch_size=16,
+    num_epochs=20,
+    learning_rate=1e-4
 ):
-    """Train the Emotional Embedding Space model using batched data."""
+    """Train the Emotional Embedding Space model."""
+    logger = logging.getLogger(__name__)
+    
+    # Ensure minimum batch size
+    if batch_size < 4:
+        logger.warning(f"Batch size {batch_size} is too small, setting to 4")
+        batch_size = 4
     
     # Create checkpoint directory if it doesn't exist
-    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     # Initialize models
@@ -404,17 +410,18 @@ def train_ees(
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_sessions,
+        drop_last=True,
         num_workers=0  # Disable multiprocessing for now
     )
     
-    if val_dataset:
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_sessions,
-            num_workers=0
-        )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_sessions,
+        drop_last=True,
+        num_workers=0
+    )
     
     # Initialize training metrics
     best_val_loss = float('inf')
@@ -463,29 +470,27 @@ def train_ees(
             avg_train_loss = train_loss / num_batches if num_batches > 0 else float('inf')
             
             # Validation
-            if val_dataset:
-                val_loss = validate_ees(ees, memory_system, val_loader, device)
-                
-                # Save checkpoint if validation loss improved
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    checkpoint_path = checkpoint_dir / f"best_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
-                    torch.save({
-                        'epoch': epoch,
-                        'ees_state_dict': ees.state_dict(),
-                        'memory_system_state_dict': memory_system.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'val_loss': val_loss,
-                    }, checkpoint_path)
-                    logger.info(f"Saved best model checkpoint to {checkpoint_path}")
+            val_loss = validate_ees(ees, memory_system, val_loader, device)
+            
+            # Save checkpoint if validation loss improved
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                checkpoint_path = checkpoint_dir / f"best_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+                torch.save({
+                    'epoch': epoch,
+                    'ees_state_dict': ees.state_dict(),
+                    'memory_system_state_dict': memory_system.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_loss': val_loss,
+                }, checkpoint_path)
+                logger.info(f"Saved best model checkpoint to {checkpoint_path}")
             
             # Log epoch metrics
             epoch_time = time.time() - epoch_start
             current_memory = process.memory_info().rss / 1024 / 1024
             logger.info(f"Epoch {epoch+1}/{num_epochs}:")
             logger.info(f"  Train Loss: {avg_train_loss:.4f}")
-            if val_dataset:
-                logger.info(f"  Val Loss: {val_loss:.4f}")
+            logger.info(f"  Val Loss: {val_loss:.4f}")
             logger.info(f"  Time: {epoch_time:.2f}s")
             logger.info(f"  Memory: {current_memory:.2f} MB")
             
@@ -507,54 +512,76 @@ def train_ees(
         
         # Cleanup
         train_dataset.cleanup()
-        if val_dataset:
-            val_dataset.cleanup()
+        val_dataset.cleanup()
 
 def validate_ees(ees, memory_system, val_loader, device):
+    """Validate the EES model on validation data."""
+    logger = logging.getLogger(__name__)
     ees.eval()
     memory_system.eval()
     total_loss = 0
-    total_batches = 0
+    num_samples = 0
     
     with torch.no_grad():
-        for batch_idx, (batch_sequences, sequence_lengths) in enumerate(val_loader):
-            batch_loss = 0
-            
-            # Process each sequence in the batch
-            for i in range(batch_sequences.size(0)):
-                seq_len = sequence_lengths[i]
-                sequence = batch_sequences[i, :seq_len]
+        for batch_sequences, sequence_lengths in val_loader:
+            try:
+                batch_size = batch_sequences.size(0)
+                max_seq_len = batch_sequences.size(1)
                 
-                ees.previous_state = None
-                memory_context = torch.zeros(1, ees.input_dim).to(device)
+                logger.debug(f"Processing validation batch: size={batch_size}, max_seq_len={max_seq_len}")
                 
-                # Process each utterance
-                for utterance_embedding in sequence:
-                    bert_context = utterance_embedding
+                # Move batch to device
+                batch_sequences = batch_sequences.to(device)
+                sequence_lengths = sequence_lengths.to(device)
+                
+                # Initialize batch states
+                batch_memory = torch.zeros(batch_size, ees.input_dim, device=device)
+                
+                # Process each sequence in parallel
+                for t in range(max_seq_len - 1):  # -1 because we need t+1 for next state
+                    # Get current and next timestep embeddings
+                    current_states = batch_sequences[:, t, :]
+                    next_states = batch_sequences[:, t + 1, :]
                     
-                    # Compute loss
-                    loss = ees.compute_loss(
-                        utterance_embedding,
-                        bert_context,
-                        memory_context
-                    )
-                    batch_loss += loss
+                    # Create mask for valid sequences at this timestep
+                    current_mask = (t < sequence_lengths).float().unsqueeze(1)
+                    next_mask = (t + 1 < sequence_lengths).float().unsqueeze(1)
                     
-                    # Update memory
-                    memory_context = memory_system(
-                        utterance_embedding,
-                        memory_context
-                    )
+                    # Skip if no valid sequences at this timestep
+                    if current_mask.sum() == 0 or next_mask.sum() == 0:
+                        continue
                     
-                    ees.previous_state = utterance_embedding
-            
-            # Average loss over batch
-            batch_loss = batch_loss / (batch_sequences.size(0) * sequence_lengths.float().mean())
-            
-            total_loss += batch_loss.item()
-            total_batches += 1
+                    try:
+                        # Compute loss only for valid sequences
+                        loss = ees.compute_loss(
+                            current_states,
+                            next_states,
+                            batch_memory
+                        )
+                        
+                        # Apply mask and accumulate loss
+                        valid_samples = current_mask.sum().item()
+                        if valid_samples > 0:
+                            masked_loss = (loss * current_mask).sum()
+                            total_loss += masked_loss.item()
+                            num_samples += valid_samples
+                        
+                        # Update memory
+                        batch_memory = memory_system(current_states, batch_memory)
+                        
+                    except Exception as e:
+                        logger.error(f"Error at timestep {t}: {str(e)}")
+                        continue
+                
+            except Exception as e:
+                logger.error(f"Error processing batch: {str(e)}")
+                continue
     
-    avg_loss = total_loss / total_batches if total_batches > 0 else float('inf')
+    # Compute average loss
+    avg_loss = total_loss / num_samples if num_samples > 0 else 100.0
+    
+    # Log validation results
+    logger.info(f"Validation complete - Samples: {num_samples}, Avg Loss: {avg_loss:.4f}")
     
     return avg_loss
 
@@ -579,31 +606,55 @@ if __name__ == "__main__":
         
         logger.info(f"Loading data from: {data_dir}")
         
-        # Create datasets
+        # Create training dataset with more data
         train_dataset = TherapySessionDataset(
             data_dir=data_dir,
             tokenizer=tokenizer,
             model=model,
             device=device,
-            validation=False
+            validation=False,
+            cache_size=1000,  # Increased from 500
+            batch_size=16,    # Increased from 8
+            max_sessions=1000 # Increased from 500
         )
         
+        # Clear memory before creating validation dataset
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Create validation dataset with proper size
         val_dataset = TherapySessionDataset(
             data_dir=data_dir,
             tokenizer=tokenizer,
             model=model,
             device=device,
-            validation=True
+            validation=True,
+            cache_size=200,
+            batch_size=16,
+            max_sessions=200,  # Ensure enough validation data
+            val_ratio=0.2      # Use 20% of data for validation
         )
         
-        if len(train_dataset) == 0:
-            raise ValueError("Training dataset is empty. Please ensure there are files in the data directory matching the pattern 'client_*.json'")
+        if len(train_dataset) == 0 or len(val_dataset) == 0:
+            raise ValueError(
+                f"Dataset empty. Train size: {len(train_dataset)}, "
+                f"Val size: {len(val_dataset)}. Ensure files match 'client_*.json'"
+            )
         
-        # Train the model
+        logger.info(f"Dataset sizes - Train: {len(train_dataset)}, Validation: {len(val_dataset)}")
+        
+        # Train the model with adjusted parameters
         train_ees(
             train_dataset=train_dataset,
             val_dataset=val_dataset,
-            device=device
+            device=device,
+            input_dim=768,
+            hidden_dim=512,
+            latent_dim=64,
+            batch_size=16,
+            num_epochs=20,
+            learning_rate=1e-4
         )
         
     except Exception as e:
@@ -616,3 +667,8 @@ if __name__ == "__main__":
             train_dataset.cleanup()
         if 'val_dataset' in locals():
             val_dataset.cleanup()
+        
+        # Final memory cleanup
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
