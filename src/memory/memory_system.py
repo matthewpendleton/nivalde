@@ -11,34 +11,24 @@ from typing import List, Optional, Tuple
 import torch.nn.functional as F
 
 class Transformer2Memory(nn.Module):
-    """Standard Transformer² implementation for hierarchical memory storage.
+    """Transformer²-based memory system for capturing nuanced emotional transitions."""
     
-    This implementation captures both emotional transitions and full contextual
-    information, providing a comprehensive patient history to the EES.
-    """
-    
-    def __init__(self, 
-                 dim: int = 768,
-                 num_layers: int = 12,
-                 num_heads: int = 12,
-                 dropout: float = 0.1,
-                 temporal_decay: float = 0.1):  
-        """Initialize the memory system.
-        
-        Args:
-            dim: Model dimension (full context embedding size)
-            num_layers: Number of transformer layers
-            num_heads: Number of attention heads
-            dropout: Dropout rate
-            temporal_decay: Temporal decay factor for surprise computation
-        """
+    def __init__(
+        self,
+        dim=384,  # Total embedding dimension
+        num_layers=4,
+        num_heads=4,  # Changed from 6 to 4 heads for better memory distinctiveness
+        dropout=0.1,
+        temporal_decay=0.1
+    ):
         super().__init__()
         
         self.dim = dim
         self.num_heads = num_heads
+        self.head_dim = dim // num_heads  # = 96 dimensions per head
         self.temporal_decay = temporal_decay
         
-        # Standard Transformer² encoder for full context
+        # Initialize transformer layers
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=dim,
             nhead=num_heads,
@@ -46,12 +36,9 @@ class Transformer2Memory(nn.Module):
             dropout=dropout,
             batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers
-        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Separate attention for emotional analysis
+        # Initialize attention mechanisms
         self.emotion_attention = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -59,205 +46,194 @@ class Transformer2Memory(nn.Module):
             batch_first=True
         )
         
-        # Surprise scoring network
-        self.surprise_scorer = nn.Sequential(
+        # Initialize memory storage
+        self.register_buffer('memories', torch.empty(0, dim))
+        self.register_buffer('emotion_memories', torch.empty(0, dim))
+        self.register_buffer('surprise_scores', torch.empty(0))
+        
+        # Semantic preservation network
+        self.semantic_net = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.LayerNorm(dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
             nn.Linear(dim, dim // 2),
             nn.LayerNorm(dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),
             nn.Linear(dim // 2, 1),
             nn.Sigmoid()
         )
-        
-        # Context integration network
-        self.context_integrator = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.LayerNorm(dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim, dim)
-        )
-        
-        # Initialize weights
-        self._init_weights()
-        
-        # Separate storage for emotional and full context
-        self.memories = []  # Full context memories
-        self.emotion_memories = []  # Emotional aspect memories
-        self.surprise_scores = []
-        
-    def _init_weights(self):
-        """Initialize network weights for better gradient flow."""
-        for name, param in self.named_parameters():
-            if 'weight' in name and 'norm' not in name:
-                if param.dim() > 1:  # Only apply to weight matrices
-                    nn.init.xavier_uniform_(param)
-                else:  # For 1D parameters (like biases)
-                    nn.init.uniform_(param, -0.1, 0.1)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
-                
-    def compute_temporal_weights(self, num_memories: int) -> torch.Tensor:
-        """Compute temporal decay weights for memories.
-        
-        More recent memories get higher weights.
-        
-        Args:
-            num_memories: Number of memories to compute weights for
-            
-        Returns:
-            Tensor of temporal weights [num_memories]
-        """
-        if num_memories == 0:
-            return torch.empty(0)
-            
-        times = torch.arange(num_memories, dtype=torch.float32)
-        weights = torch.exp(-self.temporal_decay * (num_memories - 1 - times))
-        return weights / weights.sum()  # Normalize
-        
-    def compute_surprise(self, 
-                        new_memory: torch.Tensor,
-                        prior_memories: Optional[torch.Tensor] = None) -> float:
-        """Compute surprise score using attention and temporal weighting.
-        
-        Args:
-            new_memory: New memory embedding [dim]
-            prior_memories: Optional tensor of prior memories [num_memories, dim]
-            
-        Returns:
-            Surprise score (0 to 1)
-        """
-        if prior_memories is None or len(prior_memories) == 0:
-            return 0.5  # Moderate surprise for first memory
-            
-        # Ensure proper dimensions
-        new_memory = new_memory.unsqueeze(0)  # [1, dim]
-        if len(prior_memories.shape) == 1:
-            prior_memories = prior_memories.unsqueeze(0)  # [1, dim]
-            
-        # Compute attention between new memory and prior memories
-        with torch.no_grad():
-            # Get attention weights
-            attn_output, attn_weights = self.emotion_attention(
-                new_memory,                    # query
-                prior_memories,                # key
-                prior_memories,                # value
-                need_weights=True
-            )
-            
-            # Get temporal weights [num_memories]
-            temporal_weights = self.compute_temporal_weights(len(prior_memories))
-            
-            # Weight attention by temporal importance
-            weighted_attn = attn_weights.squeeze(0) * temporal_weights
-            
-            # Get top-k most relevant memories (k=3)
-            k = min(3, len(prior_memories))
-            topk_weights, topk_indices = weighted_attn.topk(k)
-            relevant_memories = prior_memories[topk_indices]
-            
-            # Compute rate of change between memories
-            if len(relevant_memories) > 1:
-                memory_diffs = torch.diff(relevant_memories, dim=0)
-                avg_change_rate = torch.norm(memory_diffs, dim=1).mean()
-            else:
-                avg_change_rate = torch.tensor(0.0)
-            
-            # Current change magnitude
-            current_diff = torch.norm(new_memory - relevant_memories[0])
-            
-            # Normalize the difference
-            max_diff = torch.norm(torch.ones_like(new_memory) * 2)  # Maximum possible difference
-            normalized_diff = current_diff / max_diff
-            
-            # Compare current change to historical rate
-            if avg_change_rate == 0:
-                surprise_score = normalized_diff
-            else:
-                # Exponential scaling for sudden changes
-                change_ratio = (current_diff / (avg_change_rate + 1e-6)).clamp(0, 10)
-                surprise_score = 1 - torch.exp(-change_ratio)
-            
-            # Weight by attention confidence and temporal recency
-            attention_confidence = topk_weights.mean()
-            temporal_factor = temporal_weights[-1]  # Most recent weight
-            final_score = surprise_score * attention_confidence * temporal_factor
-            
-        return final_score.item()
-        
-    def store_memory(self, memory: torch.Tensor, emotion_embedding: Optional[torch.Tensor] = None):
-        """Store new memory with both full context and emotional information.
-        
-        Args:
-            memory: New memory embedding to store (full context)
-            emotion_embedding: Optional emotional aspect of the memory
-        """
-        # Use the full memory as emotion embedding if none provided
-        emotion_embedding = emotion_embedding if emotion_embedding is not None else memory
-        
-        # Compute surprise score using emotional embeddings
-        prior_emotions = (torch.stack(self.emotion_memories) 
-                         if self.emotion_memories else None)
-        surprise = self.compute_surprise(emotion_embedding, prior_emotions)
-        
-        # Store both aspects of memory
-        self.memories.append(memory)
-        self.emotion_memories.append(emotion_embedding)
-        self.surprise_scores.append(surprise)
-        
-        # Keep memories sorted by surprise score
-        if len(self.memories) > 1:
-            indices = torch.argsort(
-                torch.tensor(self.surprise_scores),
-                descending=True
-            )
-            self.memories = [self.memories[i] for i in indices]
-            self.emotion_memories = [self.emotion_memories[i] for i in indices]
-            self.surprise_scores = [self.surprise_scores[i] for i in indices]
     
-    def get_historical_context(self, 
-                             current_input: torch.Tensor,
-                             max_memories: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Retrieve relevant historical context for current input.
+    def compute_temporal_weights(self, num_memories):
+        """Compute temporal decay weights for memories."""
+        if num_memories == 0:
+            return torch.empty(0, device=self.memories.device)
+        times = torch.arange(num_memories, device=self.memories.device, dtype=torch.float32)
+        weights = torch.exp(-self.temporal_decay * (num_memories - 1 - times))
+        return weights / weights.sum()
+    
+    def store_memory(self, context, emotion=None):
+        """Store a new memory with its emotional content.
         
         Args:
-            current_input: Current input embedding
-            max_memories: Maximum number of memories to consider
-            
-        Returns:
-            Tuple of (processed_context, emotional_context)
+            context: The full contextual embedding (dim)
+            emotion: The emotional embedding (dim). If None, use context.
         """
-        if not self.memories:
-            return torch.zeros_like(current_input), torch.zeros_like(current_input)
+        if emotion is None:
+            emotion = context
+            
+        # Ensure tensors are on the correct device
+        context = context.to(self.memories.device)
+        emotion = emotion.to(self.memories.device)
         
-        # Get stored memories (limited by max_memories)
-        memories = torch.stack(self.memories[:max_memories])
-        emotion_memories = torch.stack(self.emotion_memories[:max_memories])
+        # Compute surprise if we have previous memories
+        if self.memories.size(0) > 0:
+            surprise = self.compute_surprise(emotion, self.emotion_memories)
+            self.surprise_scores = torch.cat([self.surprise_scores, surprise.unsqueeze(0)])
+        else:
+            self.surprise_scores = torch.cat([self.surprise_scores, torch.tensor([0.0], device=self.memories.device)])
         
-        # Process full context through transformer
-        sequence = torch.cat([current_input.unsqueeze(0), memories], dim=0)
-        full_context = self.transformer(sequence)
+        # Store new memory
+        self.memories = torch.cat([self.memories, context.unsqueeze(0)], dim=0)
+        self.emotion_memories = torch.cat([self.emotion_memories, emotion.unsqueeze(0)], dim=0)
+    
+    def compute_surprise(self, emotion, prior_emotions):
+        """Compute surprise score for a new emotional state.
         
-        # Process emotional context through attention
-        emotion_context, _ = self.emotion_attention(
-            current_input.unsqueeze(0),
-            emotion_memories,
-            emotion_memories
-        )
+        Args:
+            emotion: Current emotional state (dim)
+            prior_emotions: Tensor of previous emotional states (num_memories, dim)
         
-        # Integrate contexts
-        combined_context = self.context_integrator(
-            torch.cat([
-                full_context[0],
-                emotion_context.squeeze(0)
-            ], dim=0)
-        )
+        Returns:
+            Surprise score (scalar)
+        """
+        # If no prior emotions, return medium surprise
+        if prior_emotions is None:
+            return torch.tensor(0.5).to(self.memories.device)
+            
+        # Extract valence vectors
+        current_valence = emotion[:3]
+        prior_valences = prior_emotions[:, :3]
         
-        return combined_context, emotion_context.squeeze(0)
+        # Calculate similarity using cosine similarity
+        current_norm = torch.nn.functional.normalize(current_valence.unsqueeze(0), p=2, dim=1)
+        prior_norms = torch.nn.functional.normalize(prior_valences, p=2, dim=1)
+        similarities = torch.matmul(current_norm, prior_norms.t())
+        max_similarity = torch.max(similarities)
+        
+        # Find the most similar prior emotion
+        most_similar_idx = torch.argmax(similarities)
+        most_similar_emotion = prior_valences[most_similar_idx]
+        
+        # Calculate magnitude of change from most similar emotion
+        diff = torch.abs(current_valence - most_similar_emotion)
+        total_diff = torch.sum(diff)
+        
+        # Calculate dominance changes
+        current_dom_idx = torch.argmax(current_valence)
+        prior_dom_idx = torch.argmax(most_similar_emotion)
+        dom_change = current_dom_idx != prior_dom_idx
+        
+        # Simple surprise calculation based on similarity
+        if max_similarity > 0.9:  # Very similar to most similar emotion
+            valence_surprise = 0.2
+        else:
+            # Base surprise on total difference
+            valence_surprise = 0.3 + 0.6 * total_diff / 2.0
+            
+            # Additional surprise for dominance changes
+            if dom_change:
+                valence_surprise = max(valence_surprise, 0.8)
+        
+        # Ensure we stay within bounds
+        valence_surprise = torch.max(torch.min(torch.tensor(valence_surprise), torch.tensor(0.9)), torch.tensor(0.1))
+        
+        valence_surprise = valence_surprise.to(self.memories.device)
+        
+        return valence_surprise
+    
+    def compute_semantic_preservation(self, memory1, memory2):
+        """Compute semantic preservation score between two memories."""
+        # Normalize memories
+        memory1 = F.normalize(memory1, dim=0)
+        memory2 = F.normalize(memory2, dim=0)
+        
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(memory1.unsqueeze(0), memory2.unsqueeze(0))
+        
+        # Scale similarity to get higher preservation for similar memories
+        # Adjust scaling to be less aggressive
+        preservation = torch.sigmoid(3 * (similarity - 0.7))  # Lower threshold and gentler slope
+        
+        return preservation
+    
+    def get_historical_context(self, current_input=None, k=5):
+        """Get the k most recent memories and their emotional content.
+        
+        Args:
+            current_input: Optional current input to process with context
+            k: Number of recent memories to retrieve
+        
+        Returns:
+            contexts: Recent contextual memories
+            emotions: Corresponding emotional content
+        """
+        if self.memories.size(0) == 0:
+            if current_input is not None:
+                return torch.zeros_like(current_input), torch.zeros_like(current_input)
+            return None, None
+        
+        # Get most recent k memories
+        start_idx = max(0, self.memories.size(0) - k)
+        recent_contexts = self.memories[start_idx:]
+        recent_emotions = self.emotion_memories[start_idx:]
+        
+        if current_input is not None:
+            # Process through transformer
+            sequence = torch.cat([current_input.unsqueeze(0), recent_contexts], dim=0)
+            processed = self.transformer(sequence)
+            
+            # Apply semantic preservation
+            context = processed[0]
+            if recent_contexts.size(0) > 0:
+                semantic_score = self.compute_semantic_preservation(
+                    context,
+                    recent_contexts[-1]
+                )
+                context = context * semantic_score + recent_contexts[-1] * (1 - semantic_score)
+            
+            emotion_context = recent_emotions[-1]
+            return context, emotion_context
+            
+        return recent_contexts, recent_emotions
+    
+    def process_with_memory(self, input_tensor):
+        """Process input using stored memories as context.
+        
+        Args:
+            input_tensor: Input to process (dim)
+        
+        Returns:
+            Processed tensor incorporating memory context
+        """
+        if self.memories.size(0) == 0:
+            return self.transformer(input_tensor.unsqueeze(0)).squeeze(0)
+        
+        # Combine input with memories
+        combined = torch.cat([self.memories, input_tensor.unsqueeze(0)], dim=0)
+        
+        # Process through transformer
+        output = self.transformer(combined)
+        
+        # Apply semantic preservation
+        processed = output[-1]
+        if self.memories.size(0) > 0:
+            semantic_score = self.compute_semantic_preservation(
+                processed,
+                self.memories[-1]
+            )
+            processed = processed * semantic_score + self.memories[-1] * (1 - semantic_score)
+        
+        return processed
 
 
 class TransformerMemorySystem(nn.Module):
@@ -377,8 +353,8 @@ class TransformerMemorySystem(nn.Module):
         """Compute novelty score between current state and weighted memories.
         
         Args:
-            current_state: Current input state [batch_size, embedding_dim]
-            weighted_memories: Weighted sum of memories [batch_size, embedding_dim]
+            current_state: Current input state [batch_size, input_dim]
+            weighted_memories: Weighted sum of memories [batch_size, input_dim]
         
         Returns:
             Novelty scores [batch_size]
