@@ -2,238 +2,270 @@
 
 This module implements hierarchical memory storage and retrieval based on
 novelty/surprise signals, providing historical context to the EES.
+
+Each memory includes both its disclosure time (when it was told) and
+reference time (when it occurred), allowing the system to understand both
+the recency of information and its historical depth.
 """
 
 import torch
 import torch.nn as nn
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, NamedTuple
 import torch.nn.functional as F
+from dataclasses import dataclass
+import time
+from .temporal_parser import TemporalParser, TemporalReference
+
+@dataclass
+class TemporalMemory:
+    """Memory with dual temporal components and content."""
+    state: torch.Tensor          # Emotional/semantic content
+    t_disclosure: float          # When they told us
+    t_reference: float          # When it occurred
+    t_uncertainty: float        # Uncertainty in reference time (std dev in days)
+    embedding: torch.Tensor      # Full temporal-enriched embedding
+    confidence: float           # Overall confidence in memory
+
+class TemporalUncertainty:
+    """Helper class for handling vague temporal references."""
+    
+    # Common temporal expressions and their approximate uncertainties (in days)
+    UNCERTAINTY_MAPPINGS = {
+        "yesterday": 0.2,
+        "last_week": 2.0,
+        "last_month": 7.0,
+        "few_months_ago": 30.0,
+        "last_year": 60.0,
+        "years_ago": 180.0,
+        "childhood": 365.0,
+        "long_ago": 730.0
+    }
+    
+    @staticmethod
+    def estimate_uncertainty(temporal_expr: str) -> float:
+        """Estimate temporal uncertainty from natural language expression."""
+        expr = temporal_expr.lower().replace(" ", "_")
+        return TemporalUncertainty.UNCERTAINTY_MAPPINGS.get(expr, 90.0)  # Default to 3 months
+    
+    @staticmethod
+    def gaussian_window(t: torch.Tensor, mean: float, std: float) -> torch.Tensor:
+        """Create Gaussian temporal window."""
+        return torch.exp(-0.5 * ((t - mean) / std) ** 2)
 
 class Transformer2Memory(nn.Module):
-    """Transformer²-based memory system for capturing nuanced emotional transitions."""
+    """Transformer²-based memory system with temporal awareness.
+    
+    Augments memory embeddings with temporal encoding that captures both:
+    - When memories were disclosed (t_disclosure)
+    - When they occurred (t_reference)
+    
+    This allows the attention mechanism to naturally learn temporal relationships
+    and weighting patterns based on both time dimensions.
+    """
     
     def __init__(
         self,
-        dim=384,  # Total embedding dimension
-        num_layers=4,
-        num_heads=4,  # Changed from 6 to 4 heads for better memory distinctiveness
-        dropout=0.1,
-        temporal_decay=0.1
+        dim: int = 384,          # Main embedding dimension
+        temporal_dim: int = 64,   # Temporal encoding dimension
+        num_layers: int = 4,
+        num_heads: int = 4,
+        dropout: float = 0.1,
+        max_memories: int = 1000  # Maximum memories to store
     ):
         super().__init__()
         
         self.dim = dim
+        self.temporal_dim = temporal_dim
+        self.total_dim = dim + temporal_dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads  # = 96 dimensions per head
-        self.temporal_decay = temporal_decay
+        self.max_memories = max_memories
+        
+        # Temporal encoding network
+        self.temporal_encoder = nn.Sequential(
+            nn.Linear(152, temporal_dim // 2),
+            nn.LayerNorm(temporal_dim // 2),
+            nn.ReLU(),
+            nn.Linear(temporal_dim // 2, temporal_dim),
+            nn.LayerNorm(temporal_dim)
+        )
         
         # Initialize transformer layers
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim,
+            d_model=self.total_dim,
             nhead=num_heads,
-            dim_feedforward=4*dim,
+            dim_feedforward=4 * self.total_dim,
             dropout=dropout,
             batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers
+        )
         
-        # Initialize attention mechanisms
-        self.emotion_attention = nn.MultiheadAttention(
-            embed_dim=dim,
+        # Memory storage
+        self.memories: List[TemporalMemory] = []
+        
+        # Temporal attention
+        self.temporal_attention = nn.MultiheadAttention(
+            embed_dim=self.total_dim,
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True
         )
         
-        # Initialize memory storage
-        self.register_buffer('memories', torch.empty(0, dim))
-        self.register_buffer('emotion_memories', torch.empty(0, dim))
-        self.register_buffer('surprise_scores', torch.empty(0))
+        self.temporal_parser = TemporalParser()
         
-        # Semantic preservation network
-        self.semantic_net = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.LayerNorm(dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim // 2),
-            nn.LayerNorm(dim // 2),
-            nn.ReLU(),
-            nn.Linear(dim // 2, 1),
-            nn.Sigmoid()
+    def encode_temporal(
+        self,
+        t_disclosure: torch.Tensor,
+        t_reference: torch.Tensor,
+        t_uncertainty: torch.Tensor,
+        t_now: Optional[float] = None
+    ) -> torch.Tensor:
+        """Encode temporal information with uncertainty."""
+        if t_now is None:
+            t_now = time.time()
+            
+        # Convert to relative times (in days)
+        t_disclosure_rel = (t_now - t_disclosure) / (24 * 3600)  # Convert to days
+        t_reference_rel = (t_now - t_reference) / (24 * 3600)
+        
+        # Create temporal uncertainty windows
+        time_grid = torch.linspace(0, 365*5, 50)  # 5 year grid
+        disclosure_window = TemporalUncertainty.gaussian_window(
+            time_grid, 
+            t_disclosure_rel, 
+            torch.ones_like(t_disclosure_rel)  # Fixed 1-day uncertainty for disclosure
         )
-    
-    def compute_temporal_weights(self, num_memories):
-        """Compute temporal decay weights for memories."""
-        if num_memories == 0:
-            return torch.empty(0, device=self.memories.device)
-        times = torch.arange(num_memories, device=self.memories.device, dtype=torch.float32)
-        weights = torch.exp(-self.temporal_decay * (num_memories - 1 - times))
-        return weights / weights.sum()
-    
-    def store_memory(self, context, emotion=None):
-        """Store a new memory with its emotional content.
+        reference_window = TemporalUncertainty.gaussian_window(
+            time_grid, 
+            t_reference_rel, 
+            t_uncertainty
+        )
+        
+        # Combine windows with temporal features
+        temporal_features = torch.cat([
+            disclosure_window,
+            reference_window,
+            t_uncertainty.unsqueeze(-1)  # Include raw uncertainty
+        ], dim=-1)
+        
+        return self.temporal_encoder(temporal_features)
+
+    def create_memory(
+        self,
+        state: torch.Tensor,
+        temporal_expr: Optional[str] = None,
+        t_reference: Optional[float] = None,
+        confidence: float = 1.0,
+        context_name: Optional[str] = None
+    ) -> TemporalMemory:
+        """Create a new memory with sophisticated temporal parsing.
         
         Args:
-            context: The full contextual embedding (dim)
-            emotion: The emotional embedding (dim). If None, use context.
+            state: Emotional state tensor
+            temporal_expr: Natural language time expression
+            t_reference: Explicit timestamp (if known)
+            confidence: Base confidence in memory
+            context_name: Name to store as temporal context anchor
         """
-        if emotion is None:
-            emotion = context
-            
-        # Ensure tensors are on the correct device
-        context = context.to(self.memories.device)
-        emotion = emotion.to(self.memories.device)
+        t_now = time.time()
         
-        # Compute surprise if we have previous memories
-        if self.memories.size(0) > 0:
-            surprise = self.compute_surprise(emotion, self.emotion_memories)
-            self.surprise_scores = torch.cat([self.surprise_scores, surprise.unsqueeze(0)])
+        if temporal_expr is not None:
+            # Parse temporal expression
+            temporal_ref = self.temporal_parser.parse_expression(
+                temporal_expr,
+                base_confidence=confidence
+            )
+            
+            # Store as context anchor if name provided
+            if context_name:
+                self.temporal_parser.add_context(context_name, temporal_ref)
+            
+            t_ref = temporal_ref.mean_time
+            t_uncertainty = temporal_ref.uncertainty
+            confidence = temporal_ref.confidence
+            
         else:
-            self.surprise_scores = torch.cat([self.surprise_scores, torch.tensor([0.0], device=self.memories.device)])
+            t_ref = t_reference if t_reference is not None else t_now
+            t_uncertainty = 1.0  # Default 1 day uncertainty
         
-        # Store new memory
-        self.memories = torch.cat([self.memories, context.unsqueeze(0)], dim=0)
-        self.emotion_memories = torch.cat([self.emotion_memories, emotion.unsqueeze(0)], dim=0)
-    
-    def compute_surprise(self, emotion, prior_emotions):
-        """Compute surprise score for a new emotional state.
+        # Create temporal encoding with uncertainty
+        temporal_features = self.encode_temporal(
+            torch.tensor([t_now]),
+            torch.tensor([t_ref]),
+            torch.tensor([t_uncertainty])
+        )
+        
+        # Combine with state embedding
+        full_embedding = torch.cat([state, temporal_features[0]], dim=-1)
+        
+        memory = TemporalMemory(
+            state=state,
+            t_disclosure=t_now,
+            t_reference=t_ref,
+            t_uncertainty=t_uncertainty,
+            embedding=full_embedding,
+            confidence=confidence
+        )
+        
+        if len(self.memories) >= self.max_memories:
+            self.memories.pop(0)
+        self.memories.append(memory)
+        
+        return memory
+        
+    def get_memory_batch(self) -> torch.Tensor:
+        """Get batch of all memory embeddings for transformer processing."""
+        if not self.memories:
+            return torch.empty(0, self.total_dim)
+            
+        return torch.stack([m.embedding for m in self.memories])
+        
+    def forward(
+        self,
+        query_state: torch.Tensor,
+        t_reference: Optional[float] = None
+    ) -> Tuple[torch.Tensor, List[float]]:
+        """Process query through temporal memory system.
         
         Args:
-            emotion: Current emotional state (dim)
-            prior_emotions: Tensor of previous emotional states (num_memories, dim)
-        
+            query_state: Current emotional state [batch_size, dim]
+            t_reference: Optional reference time for query
+            
         Returns:
-            Surprise score (scalar)
+            Tuple of:
+            - Updated state with memory context
+            - Attention weights for each memory
         """
-        # If no prior emotions, return medium surprise
-        if prior_emotions is None:
-            return torch.tensor(0.5).to(self.memories.device)
+        # Create query embedding with temporal encoding
+        query_memory = self.create_memory(query_state, t_reference=t_reference)
+        memory_batch = self.get_memory_batch()
+        
+        if memory_batch.size(0) == 0:
+            return query_state, []
             
-        # Extract valence vectors
-        current_valence = emotion[:3]
-        prior_valences = prior_emotions[:, :3]
-        
-        # Calculate similarity using cosine similarity
-        current_norm = torch.nn.functional.normalize(current_valence.unsqueeze(0), p=2, dim=1)
-        prior_norms = torch.nn.functional.normalize(prior_valences, p=2, dim=1)
-        similarities = torch.matmul(current_norm, prior_norms.t())
-        max_similarity = torch.max(similarities)
-        
-        # Find the most similar prior emotion
-        most_similar_idx = torch.argmax(similarities)
-        most_similar_emotion = prior_valences[most_similar_idx]
-        
-        # Calculate magnitude of change from most similar emotion
-        diff = torch.abs(current_valence - most_similar_emotion)
-        total_diff = torch.sum(diff)
-        
-        # Calculate dominance changes
-        current_dom_idx = torch.argmax(current_valence)
-        prior_dom_idx = torch.argmax(most_similar_emotion)
-        dom_change = current_dom_idx != prior_dom_idx
-        
-        # Simple surprise calculation based on similarity
-        if max_similarity > 0.9:  # Very similar to most similar emotion
-            valence_surprise = 0.2
-        else:
-            # Base surprise on total difference
-            valence_surprise = 0.3 + 0.6 * total_diff / 2.0
-            
-            # Additional surprise for dominance changes
-            if dom_change:
-                valence_surprise = max(valence_surprise, 0.8)
-        
-        # Ensure we stay within bounds
-        valence_surprise = torch.max(torch.min(torch.tensor(valence_surprise), torch.tensor(0.9)), torch.tensor(0.1))
-        
-        valence_surprise = valence_surprise.to(self.memories.device)
-        
-        return valence_surprise
-    
-    def compute_semantic_preservation(self, memory1, memory2):
-        """Compute semantic preservation score between two memories."""
-        # Normalize memories
-        memory1 = F.normalize(memory1, dim=0)
-        memory2 = F.normalize(memory2, dim=0)
-        
-        # Compute cosine similarity
-        similarity = F.cosine_similarity(memory1.unsqueeze(0), memory2.unsqueeze(0))
-        
-        # Scale similarity to get higher preservation for similar memories
-        # Adjust scaling to be less aggressive
-        preservation = torch.sigmoid(3 * (similarity - 0.7))  # Lower threshold and gentler slope
-        
-        return preservation
-    
-    def get_historical_context(self, current_input=None, k=5):
-        """Get the k most recent memories and their emotional content.
-        
-        Args:
-            current_input: Optional current input to process with context
-            k: Number of recent memories to retrieve
-        
-        Returns:
-            contexts: Recent contextual memories
-            emotions: Corresponding emotional content
-        """
-        if self.memories.size(0) == 0:
-            if current_input is not None:
-                return torch.zeros_like(current_input), torch.zeros_like(current_input)
-            return None, None
-        
-        # Get most recent k memories
-        start_idx = max(0, self.memories.size(0) - k)
-        recent_contexts = self.memories[start_idx:]
-        recent_emotions = self.emotion_memories[start_idx:]
-        
-        if current_input is not None:
-            # Process through transformer
-            sequence = torch.cat([current_input.unsqueeze(0), recent_contexts], dim=0)
-            processed = self.transformer(sequence)
-            
-            # Apply semantic preservation
-            context = processed[0]
-            if recent_contexts.size(0) > 0:
-                semantic_score = self.compute_semantic_preservation(
-                    context,
-                    recent_contexts[-1]
-                )
-                context = context * semantic_score + recent_contexts[-1] * (1 - semantic_score)
-            
-            emotion_context = recent_emotions[-1]
-            return context, emotion_context
-            
-        return recent_contexts, recent_emotions
-    
-    def process_with_memory(self, input_tensor):
-        """Process input using stored memories as context.
-        
-        Args:
-            input_tensor: Input to process (dim)
-        
-        Returns:
-            Processed tensor incorporating memory context
-        """
-        if self.memories.size(0) == 0:
-            return self.transformer(input_tensor.unsqueeze(0)).squeeze(0)
-        
-        # Combine input with memories
-        combined = torch.cat([self.memories, input_tensor.unsqueeze(0)], dim=0)
+        # Add query to memory batch for self-attention
+        full_batch = torch.cat([
+            memory_batch,
+            query_memory.embedding.unsqueeze(0)
+        ])
         
         # Process through transformer
-        output = self.transformer(combined)
+        transformed = self.transformer(full_batch)
         
-        # Apply semantic preservation
-        processed = output[-1]
-        if self.memories.size(0) > 0:
-            semantic_score = self.compute_semantic_preservation(
-                processed,
-                self.memories[-1]
-            )
-            processed = processed * semantic_score + self.memories[-1] * (1 - semantic_score)
+        # Temporal attention between query and memories
+        attn_output, attn_weights = self.temporal_attention(
+            transformed[-1:],  # Query
+            transformed[:-1],  # Keys (memories)
+            transformed[:-1]   # Values (memories)
+        )
         
-        return processed
+        # Combine with original state
+        output_state = query_state + attn_output[0, :self.dim]
+        
+        return output_state, attn_weights[0].tolist()
 
 
 class TransformerMemorySystem(nn.Module):

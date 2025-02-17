@@ -11,16 +11,65 @@ The key innovation lies not just in these spaces themselves, but in the sophisti
 Emotional Embedding Space (EES)
 -----------------------------
 
-The EES is a high-dimensional vector space that captures patient emotional states and their dynamics. Each point in this space represents a distinct emotional state, with the local topology describing potential transitions and stability.
+The Emotional Embedding Space (EES) is a non-uniform manifold that captures emotional states and their dynamics, incorporating both current linguistic content and historical context through memory.
 
-Key Properties:
-~~~~~~~~~~~~~
+Core Formulation
+~~~~~~~~~~~~~~
 
-1. Dimensionality: :math:`d = 768`, matching BERT's hidden state dimension
-2. Metric: Cosine similarity for emotional state comparison
-3. Local Topology: Describes nearby achievable emotional transitions
-4. Phase Transitions: Regions of emotional state instability or rapid change
-5. Hysteresis: Path-dependent emotional state evolution
+The emotional state :math:`e_t` at time t is given by:
+
+.. math::
+
+   e_t = f(x_t, m_t)
+
+where:
+- :math:`x_t \in \mathbb{R}^d` is the BERT embedding capturing current emotional content
+- :math:`m_t` is the memory state encoding historical context
+- :math:`f` is a non-linear mapping that preserves emotional dynamics
+
+Key Properties
+~~~~~~~~~~~~
+
+1. Non-uniform Topology:
+   The space is structured with varying "emotional potential" :math:`V(e)`:
+
+   .. math::
+
+      \frac{de}{dt} = -\nabla V(e)
+
+   creating natural attractors and barriers in the emotional landscape.
+
+2. Hysteresis:
+   The system exhibits path dependence through memory integration:
+
+   .. math::
+
+      m_t = h(m_{t-1}, x_t)
+
+   where the historical trajectory influences future states.
+
+3. State Transitions:
+   Emotional changes follow paths of least resistance:
+
+   .. math::
+
+      P(e_t \rightarrow e_{t+1}) \propto \exp(-\Delta V/\tau)
+
+   where :math:`\Delta V` is the potential difference and :math:`\tau` is emotional inertia.
+
+Implementation
+~~~~~~~~~~~~
+
+The EES combines:
+1. BERT embeddings for linguistic emotional content
+2. Memory system for historical context
+3. Non-linear dynamics for realistic emotional evolution
+
+This formulation naturally captures:
+- Emotional inertia (resistance to rapid changes)
+- Path dependence (hysteresis effects)
+- Stable emotional states (attractors)
+- Transition barriers between states
 
 Therapeutic State Manifold (TSM)
 ------------------------------
